@@ -110,6 +110,49 @@ class Version:
     created_at: float = field(default_factory=time.time)
 
 
+# --- error surfacing ---------------------------------------------------------
+
+def surfacing_errors(fn):
+    """Return the error text to the agent instead of letting it be swallowed.
+
+    Found by actually running an agent against this server (§19, Probe 9). The
+    MCP SDK wraps any exception a tool raises as `UnexpectedToolError: Error
+    executing tool <name>` and the real message never reaches the client. The
+    agent therefore saw an identical opaque failure for every input — its own
+    strategy, a dummy strategy, a nonexistent id — correctly concluded from that
+    evidence that the tool was broken server-side, and stopped.
+
+    **An agent cannot fix a mistake it cannot see.** A tool that hides why it
+    failed converts a one-line correction into a dead end, so every tool here
+    catches its own exceptions and returns the message as text. The type name is
+    included because "KeyError: 'fast'" tells the agent exactly what to change,
+    while "something went wrong" tells it to give up.
+    """
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:                      # noqa: BLE001 - deliberate
+            return json.dumps({
+                "error": f"{type(exc).__name__}: {exc}",
+                "tool": fn.__name__,
+                "hint": _HINTS.get(type(exc).__name__, ""),
+            }, indent=2)
+
+    return wrapper
+
+
+_HINTS = {
+    "KeyError": "a parameter the signal block reads was not supplied — check the "
+                "params passed to strategy_save or backtest_run",
+    "ValueError": "check the arguments against the tool description",
+    "IndexError": "an array in the signal block is not the same length as bars",
+    "TypeError": "an argument has the wrong type; arrays must be numpy arrays",
+}
+
+
 # --- tools -------------------------------------------------------------------
 
 @server.tool(
@@ -119,6 +162,7 @@ class Version:
         "a timeframe its source is fine enough to serve."
     )
 )
+@surfacing_errors
 def data_list() -> str:
     if not DATA:
         return "No data loaded. Use data_load(path) first."
@@ -138,6 +182,7 @@ def data_list() -> str:
         "UTC. Returns the quality report — read it, do not assume the file is clean."
     )
 )
+@surfacing_errors
 def data_load(name: str, path: str, utc_offset_hours: float = 0.0) -> str:
     from engine.store import SourceSpec
 
@@ -172,6 +217,7 @@ def data_load(name: str, path: str, utc_offset_hours: float = 0.0) -> str:
         "number; nothing is ever overwritten."
     )
 )
+@surfacing_errors
 def strategy_save(
     strategy_id: str,
     description: str,
@@ -196,6 +242,7 @@ def strategy_save(
 
 
 @server.tool(description="List strategies and their versions, newest first.")
+@surfacing_errors
 def strategy_list() -> str:
     if not STRATEGIES:
         return "No strategies saved."
@@ -208,6 +255,7 @@ def strategy_list() -> str:
 
 
 @server.tool(description="Fetch one strategy version's source and parameters.")
+@surfacing_errors
 def strategy_get(strategy_id: str, version: int = 0) -> str:
     v = _version(strategy_id, version)
     return json.dumps(
@@ -224,6 +272,7 @@ def strategy_get(strategy_id: str, version: int = 0) -> str:
         "the engine are not comparable with anything in the library."
     )
 )
+@surfacing_errors
 def backtest_run(
     strategy_id: str,
     data: str,
@@ -261,6 +310,7 @@ def backtest_run(
         "strategy family, not per run."
     )
 )
+@surfacing_errors
 def optimize_run(
     strategy_id: str,
     data: str,
@@ -314,6 +364,7 @@ def optimize_run(
         "optimization generalized; far below means the train folds were fitted."
     )
 )
+@surfacing_errors
 def validate_run(
     strategy_id: str,
     data: str,
@@ -375,6 +426,7 @@ def validate_run(
         "engine's actual trade list, so what is shown is exactly what was measured."
     )
 )
+@surfacing_errors
 def chart_apply(
     strategy_id: str,
     data: str,

@@ -965,10 +965,28 @@ copy-on-write access to the loaded bar arrays, so the store need not be copied p
 So: **sweep in `open_prices`, re-validate survivors in `real_ticks`.** Parallelize across
 evaluations with `joblib`/`multiprocessing` — never inside an evaluation (§7, determinism).
 
-**Discipline:** coarse grids over fine (looking for plateaus, not peaks — a sharp optimum is a
-fitting artifact) · optimize on train folds only · multi-symbol is a robustness test, not a
-search space (fit on one, require survival on others *unchanged*) · **log the comparison
+**Discipline:** coarse grids over fine · optimize on train folds only · **log the comparison
 count**, because §12's deflated Sharpe needs it.
+
+### Plateaus, not peaks — and now it is load-bearing
+
+Cross-symbol survival has been dropped at the owner's direction, which removes the plan's
+strongest robustness filter. What remains — walk-forward efficiency, the deflated Sharpe over a
+cumulative trial count, and plateau analysis — therefore carries the whole load, and the third
+was previously only a slogan.
+
+**Built** (`engine/optimize/plateau.py`, 9 tests). For any configuration it scores the
+grid-adjacent neighbourhood — one step in each swept parameter — and reports
+
+    robustness = mean(neighbour scores) / peak score
+
+Near 1.0 is a plateau; near 0 is an isolated spike, which is a hole in the noise rather than an
+edge, and next year's noise has its holes elsewhere. It costs nothing on a grid sweep because
+the neighbours are already evaluated.
+
+`rank_by_robustness` re-orders the top-K so plateau candidates come first while still showing
+each raw score — because **the highest-scoring configuration is usually not the one to take**,
+and that trade-off should be visible rather than decided silently.
 
 ---
 
@@ -986,10 +1004,9 @@ Independently toggleable. A run reports all enabled verdicts, not one pass/fail.
 | **MC — trade shuffle** | Whether results depend on lucky ordering |
 | **MC — block bootstrap** | Ruin and drawdown distribution (prop-firm-sim) |
 | **MC — cost perturbation** | Randomized spread/slippage within observed bounds |
-| **Cross-symbol** | Same parameters, other instruments, unchanged |
 | **Cross-timeframe** | Neighbouring signal timeframes (requires durations, §4.5) |
+| **Parameter plateau** | Neighbourhood robustness (§11) — the main robustness filter now that cross-symbol is out |
 | **Cross-mode** | `open_prices` vs `real_ticks` (§6) |
-| **Parameter plateau** | Neighbourhood surface, 2D/3D in the UI. A peak is a red flag |
 | **Randomized-entry benchmark** | Same exits and sizing, random entries. If the strategy doesn't beat it, the entry logic contributes nothing |
 | **Holdout** | Final. Touched once — §13 |
 
@@ -1284,10 +1301,11 @@ worth trusting most.
    produces, the screen found nothing** — however good that one equity curve
    looks. Report the best result's percentile against the null, every time.
 
-4. **Cross-symbol survival is the strongest filter, and screening makes it
-   cheap.** A concept that survives *unchanged* on five instruments is worth
-   more than one tuned to fit one. Rank on cross-symbol consistency before
-   ranking on any single-symbol metric.
+4. **Rank on plateau robustness, not on the peak score.** The owner is not using
+   cross-symbol survival, so within-screen robustness does the work: a concept
+   whose good result sits on a plateau of comparably good neighbours is worth
+   more than one perched on a spike. `rank_by_robustness` (§11) reorders the
+   shortlist on exactly that.
 
 #### What screening must not become
 
@@ -1687,33 +1705,48 @@ wide relative to bar range, no intrabar ambiguity — through our engine and thr
 and compare trade-by-trade (§10.4). Agreement is the independent reference; divergence means
 one of them has a bug and finding out which is the point. Cheap: one test, not a subsystem.
 
-**Probe 9 — the MCP surface. Partly done.**
+**Probe 9 — the MCP surface. Done.** The engine runs as an MCP server
+(`quantor_mcp/server.py`) on the current SDK (`mcp` 2.x, where `FastMCP` became `MCPServer`),
+exposing nine tools. **A real Claude Code session was run against it**, scoped to the MCP tools
+with `--permission-mode dontAsk`, asked to load data, write an EMA-crossover strategy with an
+ATR stop, save it and backtest it.
 
-**Built and verified** (`quantor_mcp/server.py`): the engine runs as an MCP server on the
-current SDK (`mcp` 2.x, where `FastMCP` became `MCPServer`), exposing `data_list`, `data_load`,
-`strategy_save`, `strategy_list`, `strategy_get`, `backtest_run`, `optimize_run`,
-`validate_run` and `chart_apply`. Every tool was driven end to end against a 40,000-bar source:
-data loaded with its quality report, a strategy saved and versioned, a backtest returning
-metrics with the ledger reconciling, a grid sweep reporting its comparison count, walk-forward
-returning per-fold results and efficiency, and `chart_apply` returning that run's own markers.
+Three findings, in increasing order of how much they changed the design.
 
-**What it found.** The first design executed signal blocks in a restricted namespace with a
-trimmed `__builtins__`, and it failed immediately: `KeyError: '__import__'`, because numba's
-dispatchers import at call time. That is not a detail to patch around — it is the evidence that
-namespace restriction is not enforcement. The AST validator (§9) is, and it now runs at
-`strategy_save`, before a block is ever stored.
+**1. `cwd` in `.mcp.json` is not reliable.** Launching the server as `python -m
+quantor_mcp.server` with a `cwd` field produced `CONNECTION_CLOSED`: the module is only
+importable from the repo root, and the cwd was not applied. Invoke by **absolute script path**
+instead — the script puts its own root on `sys.path`. Startup is 1.0 s, so timeouts were never
+the issue.
 
-**Still to do, and it needs a Claude Code session rather than a test harness:**
+**2. The agent does use the tools — and reaches for Bash the moment they fail.** On the first
+run, with the server down, it immediately tried `Bash(ls …; find / -iname …)`. `--allowedTools`
+correctly denied it. That is the question this probe existed to answer: the tool surface holds
+*while it works*, and permission scoping is what holds when it does not. It also reported the
+failure honestly rather than inventing results.
 
-1. `--mcp-config` with LuxAlgo, Edge Stats and prop-firm-sim — confirm all three load, checking
-   `system/init` for `mcp_server_errors` rather than assuming. **LuxAlgo's endpoint is
-   unreachable from this environment** (egress-blocked), so its tool surface is unverified —
-   run this locally.
-2. **Does the agent actually use the tools, or work around them?** The question Probe 9 exists
-   for. If it reaches for Bash, the tool design is wrong and better prompting will not fix it.
-3. Confirm `--allowedTools` scoped to MCP plus `Read`/`Edit` blocks what it should.
-4. Confirm `--resume` restores a conversation with its servers intact — §15.1's premise is that
-   the conversation survives restarts.
+**3. The finding that mattered: a tool that hides its error makes the agent give up.** The MCP
+SDK wraps any exception a tool raises as `UnexpectedToolError: Error executing tool <name>`,
+and the real message never reaches the client. The agent therefore saw an identical opaque
+failure for its own strategy, a dummy strategy, and a deliberately nonexistent id — and from
+that evidence correctly concluded the tool was broken server-side. It was not; a `KeyError` in
+its own signal block was.
+
+**An agent cannot fix a mistake it cannot see.** Every tool now catches its own exceptions and
+returns `{"error": "KeyError: 'fast'", "hint": ...}` as text. Re-running the identical session:
+
+| | before | after |
+|---|---|---|
+| turns | 28 | **13** |
+| cost | $0.47 | **$0.20** |
+| outcome | gave up, tool "broken" | **backtest, metrics reported** |
+| Bash attempts | 1 (denied) | **0** |
+
+It reached **v3** of its strategy — self-correcting twice from the error text — and finished by
+reporting an honest losing result rather than dressing it up, then offering `optimize_run`.
+
+**Left for a local run:** LuxAlgo's MCP endpoint is egress-blocked from this environment, so
+its tool surface is unverified, and `--resume` across a restart is untested.
 
 Codex is out of scope (§14.7).
 
@@ -1769,7 +1802,8 @@ What this measures:
 11. **The conversation** (§15.1) — Probe 7, then the chat itself. Last to build, because it is
     the easiest part and the most dangerous to trust, and because a chat that proposes
     strategies is only useful once the machinery that evaluates them is sound. It is the
-    headline feature; it is still built last.
+    headline feature; it is still built last. The MCP server it talks to already exists and is
+    agent-tested (§19, Probe 9).
 
 Steps 3–5 are largely independent and can proceed in parallel, using synthetic data for the
 harness work until the store is real.

@@ -26,17 +26,17 @@ owner's own MT5 backtests as the verification ground truth.
 | `engine/optimize/` | Grid and random search, objectives with guards |
 | `engine/validate/` | Fold geometry, walk-forward |
 | `engine/signal/` | Static validator for generated signal blocks (§9) |
-| `quantor_mcp/` | The engine as an MCP server the agent drives (§14.2) |
+| `quantor_mcp/` | The engine as an MCP server — agent-tested (§14.2, Probe 9) |
 | `bench/demo_loop.py` | End-to-end: signal → backtest → optimize → walk-forward |
 | `bench/probe_vectorbt.py` | Reproduces the VectorBT parameter-grid trap (§3.1) |
-| `tests/` | 158 passing |
+| `tests/` | 167 passing |
 | `tools/pinets_oracle/` | Dev-only fixture generator (AGPL, never shipped) |
 | `bench/` | Reproduces every `[measured]` number in the plan |
 
 ## Quick start
 
     pip install numpy pandas numba pyarrow pytest
-    python3 -m pytest tests/ -v            # 158 tests
+    python3 -m pytest tests/ -v            # 167 tests
     python3 bench/demo_loop.py             # the whole loop, end to end
     python3 bench/bench_indicators.py      # signal-pass cost
     python3 bench/bench_ticks.py           # ingest, bars, tick-resolution fills

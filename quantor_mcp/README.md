@@ -16,11 +16,19 @@ the cost assumptions or the fold geometry.
 ```json
 {
   "mcpServers": {
-    "quantor-engine": { "command": "python3", "args": ["-m", "quantor_mcp.server"] },
-    "luxalgo":        { "command": "npx", "args": ["-y", "@luxalgo/mcp"] }
+    "quantor-engine": {
+      "command": "python3",
+      "args": ["/ABSOLUTE/PATH/TO/QUANTOR/quantor_mcp/server.py"]
+    },
+    "luxalgo": { "command": "npx", "args": ["-y", "@luxalgo/mcp"] }
   }
 }
 ```
+
+**Use the absolute script path, not `-m quantor_mcp.server` with a `cwd` field.**
+The `cwd` was not applied in testing and the module is only importable from the
+repo root, so the server died with `CONNECTION_CLOSED` (§19, Probe 9). The script
+puts its own root on `sys.path`, so by-path works from anywhere. Startup is ~1 s.
 
 Then scope the agent to the tools rather than the shell:
 
@@ -55,6 +63,22 @@ names, and numba's dispatchers need `__import__` at call time regardless — whi
 is exactly why the validator, not the namespace, is the enforcement. These are
 correctness boundaries against an agent following the §9 contract imperfectly.
 Never run a signal block the owner did not initiate.
+
+## Errors are returned, never swallowed
+
+Every tool catches its own exceptions and returns
+`{"error": "KeyError: 'fast'", "hint": "..."}` as text.
+
+This is not defensive style, it is a finding. The MCP SDK wraps any exception a
+tool raises as `UnexpectedToolError: Error executing tool <name>` and the real
+message never reaches the client. Tested against a real agent session, that made
+every failure look identical — its own broken strategy, a dummy strategy, and a
+nonexistent id all returned the same opaque string — so the agent correctly
+concluded from the evidence that the tool was broken and stopped. It was not.
+
+**An agent cannot fix a mistake it cannot see.** With error text returned, the
+identical session went from 28 turns and giving up to 13 turns and a completed
+backtest, self-correcting twice on the way. Keep the decorator on every tool.
 
 ## State
 

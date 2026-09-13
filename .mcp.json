@@ -2,7 +2,7 @@
   "mcpServers": {
     "quantor-engine": {
       "command": "python3",
-      "args": ["-m", "quantor_mcp.server"]
+      "args": ["/ABSOLUTE/PATH/TO/QUANTOR/quantor_mcp/server.py"]
     },
     "luxalgo": {
       "command": "npx",
