@@ -22,8 +22,9 @@ EA. Nothing in this system targets TradingView.
 
 **Engine:** Python — numpy + numba. No Pine Script transpiler, no 1-second intermediate bars.
 
-**Agent runtime:** Claude Code or Codex CLI (primary). Raw API is a fallback, not the design
-centre — see §14.
+**Agent runtime:** Claude Code, on the owner's own subscription. **No API keys** — everything
+beyond files goes through MCP: the LuxAlgo Library, Edge Stats, Prop Firm Sim, and QUANTOR's
+own engine. One emitted artifact per strategy: a **Python** signal block. See §14.
 
 ---
 
@@ -57,6 +58,10 @@ preferences:
 - **§8's golden-fixture rule.** No indicator ships without a frozen numerical fixture.
 - **§10.1's engine invariants.** The fill engine is verified by property tests, not by
   inspection. These carry more weight now that MT5 reconciliation is not a build gate (§10.2).
+- **§14's no-API-keys rule.** The agent is Claude Code on the owner's own subscription,
+  reaching everything else through MCP. No `ANTHROPIC_API_KEY`, no raw API client. This
+  constrains reproducibility in a specific way (§14.6) — accept the constraint, do not route
+  around it.
 - **§16's keep-everything rule.** Strategies, versions, runs and rejected candidates are
   catalogued, not discarded. §9's failure taxonomy and §13's holdout tracking are queries
   over that history; delete it and neither can exist.
@@ -1067,40 +1072,43 @@ pinned per run and stamped into the artifact.
 
 ---
 
-## 14. The agent — MCP-first, no API keys
+## 14. The agent — MCP-first, no API keys, one script
 
-The agent is **Claude Code or Codex CLI running locally**, using the owner's existing
-subscription authentication. **No API keys, no billing integration, no raw API client.**
-Everything it can do beyond reading and writing files, it does through **MCP**.
+The agent is **Claude Code running locally on the owner's own subscription**.
 
-That is the whole design in one line, and the rest of this section is its consequences.
+> **No API keys. Ever.** No `ANTHROPIC_API_KEY`, no billing integration, no raw API client.
+> Everything the agent does beyond reading and writing files, it does through **MCP**.
+
+That is the design. The rest of this section is its consequences.
 
 ### 14.1 The MCP surface
 
 | Server | Transport | What the agent uses it for |
 |---|---|---|
-| **LuxAlgo Library** | `https://mcp.luxalgo.com/mcp`, keyless (or `npx @luxalgo/mcp`) | Understand a named concept; **read real Pine source** as grounding for both emitted scripts |
-| **Edge Stats** | stdio | Conditional frequencies over M1 bars, with N and a Wilson CI on every answer. "Does this setup actually happen, and how often" *before* writing a strategy for it |
+| **LuxAlgo Library** | `https://mcp.luxalgo.com/mcp`, keyless (or `npx @luxalgo/mcp`) | **Understand a concept.** Read real Pine source to learn what an order block or an FVG actually *is*, then implement it in Python |
+| **Edge Stats** | stdio | Conditional frequencies over M1 bars, N and a Wilson CI on every answer. "Does this setup even occur, and how often" — *before* writing a strategy for it |
 | **Prop Firm Sim** | stdio | Block-bootstrap Monte Carlo over the R-multiple series a backtest produced |
-| **QUANTOR engine** | stdio, **ours** | Run backtests, sweeps, validation; read results; apply a strategy to the chart (§14.2) |
+| **QUANTOR engine** | stdio, **ours** | Run backtests, sweeps, validation; read results; render on the chart (§14.2) |
 
-The fourth is the one the plan was missing, and it is what makes the design uniform.
+The Library is **reference, not strategy source** — the position §3 always took. The agent reads
+Pine to learn a definition and writes Python. No Pine is generated, stored, or run.
 
 ### 14.2 The engine is an MCP server
 
 Without it the agent has Bash and a Python package, so every backtest is an ad-hoc script it
-writes, runs, and parses the stdout of. That is brittle, unauditable, and gives the agent far
-more latitude than the task needs.
+writes, runs, and parses its own stdout from. Brittle, unauditable, and far more latitude than
+the task needs.
 
 With it, the agent calls typed tools and the engine owns the semantics:
 
 ```
 data_list()                          -> loaded sources, resolution, GMT offset, quality
-strategy_save(spec, python, pine)    -> new version, lineage recorded (§16.3)
-strategy_get(id, version)            -> spec + both scripts
+strategy_save(name, description,
+              signal_block, params)  -> new version, lineage recorded (§16.3)
+strategy_get(id, version)            -> the signal block + its parameter spec
 backtest_run(id, version, params,
              symbol, timeframe, span,
-             modeling_mode)          -> metrics, trade summary, equity curve ref
+             modeling_mode)          -> metrics, trade list, equity curve ref
 optimize_run(id, param_spec, budget) -> results table, comparison count
 validate_run(id, params, modes)      -> per-mode verdicts (§12)
 chart_apply(id, version)             -> render signals + trades on the chart
@@ -1109,118 +1117,117 @@ runs_query(filter)                   -> history from the library (§16)
 
 Three things this buys:
 
-- **The research-integrity boundary becomes enforceable** (§13). In strict mode the OOS tools
-  simply return a verdict; there is no filesystem path to read around, because the agent was
-  never handed one.
-- **Every action is logged as a tool call**, so "what did the agent actually do" is answerable
-  from the transcript without reconstructing intent from shell history.
+- **Research integrity becomes enforceable** (§13). In strict mode the OOS tools return a
+  verdict and there is no filesystem path to read around it, because the agent was never handed
+  one. That is the process-isolation fix, for free.
+- **Every action is a logged tool call**, so "what did it actually do" is answerable from the
+  transcript rather than reconstructed from shell history.
 - **The agent cannot invent its own backtest.** It cannot quietly change the fill model, the
   cost assumptions or the fold geometry, because those live behind the tool.
 
-### 14.3 Two scripts, one strategy
+With the engine behind MCP the agent barely needs Bash, which tightens the permission surface
+considerably.
 
-Each strategy produces **two emitted scripts**:
+### 14.3 One emission: Python
 
-- **Pine Script** — grounded in real Library source pulled over MCP. Goes on the chart. This
-  is what the owner *looks at*.
-- **Python** — runs on the engine. This is what produces *numbers*.
+A strategy is **a Python signal block plus its parameter spec** (§9, §11). That is the whole
+artifact. There is no second representation, no spec-to-code generation step, and nothing to
+keep in sync.
 
-**They are siblings, generated from one spec — not translations of each other.** The strategy
-itself is a short structured spec (entry condition, exit, stop, target, session filter,
-parameters and bounds); both scripts are emitted from it, and **the spec is what versions**.
-Generating Python and then "translating" it to Pine reintroduces the translation-is-a-claim
-problem that got code export cut (§22); generating both from a spec does not, because neither
-is authoritative over the other.
+Pine Script emission was considered and dropped, and the reasoning is worth keeping because the
+idea recurs: two independently emitted scripts of "the same" strategy drift — a condition on a
+different bar, an indicator seeded differently — and then neither is authoritative and you need
+a comparison harness to find out which lied. One emission has no such failure mode.
 
-**Division of authority, and it is not negotiable:**
+A short human-readable **description** travels with each version, but it is metadata for the
+library and the conversation (§15.2), not a source the code is generated from. The code is the
+strategy.
 
-> **Python is the system of record for every number. Pine is for looking at.**
-> A TradingView backtest figure is never quoted as a result of this system.
-
-**The honest risk: two scripts drift.** Independently emitted, they can disagree — a condition
-evaluated on a different bar, an indicator seeded differently. Three things keep that bounded,
-in increasing cost:
-
-1. **Pine-exact indicators (§8).** Our Python `ema`/`rma`/`rsi`/`atr` are pinned to a Pine
-   oracle by golden fixtures. This is why that work matters more under this design, not less.
-2. **Signal comparison.** Both emit entry/exit markers with timestamps. Compare the two lists.
-   Cheap, mechanical, and it catches real divergence without a parity subsystem.
-3. **The owner's eye.** Which is the next point, and is not a fallback.
+**What dropping Pine also bought:** the chart now renders **the actual backtest's** signals and
+trades (§14.4), not a parallel implementation's. Chart verification went from "these two things
+should agree" to "this is what happened".
 
 ### 14.4 Verification by looking at the chart
 
-The owner applies the Pine script, looks at where it entered and exited, and judges. This is a
-**first-class step, not a consolation prize.** It catches things no metric does:
+The owner applies the strategy, looks at where it entered and exited, and judges. **First-class
+step, not a consolation prize.** It catches what no metric does:
 
 - entries clustering at one time of day, or only in one regime
 - stops visibly inside normal noise
-- signals that fire somewhere the owner would never have taken the trade
+- signals firing somewhere the owner would never have taken the trade
 - a strategy that is technically profitable and obviously untradeable
 
-Metrics say whether it made money. The chart says whether it is the strategy you meant. Both
-matter, and the loop in §15.1 runs on both.
+Metrics say whether it made money. The chart says whether it is the strategy you meant. The
+loop in §15.1 runs on both, and because the chart draws the engine's own trade list, what you
+see is exactly what was measured.
 
-### 14.5 What "no API keys" actually costs
+### 14.5 Why indicator parity still matters
 
-One real consequence, worth stating rather than discovering: **`--bare` mode requires
-`ANTHROPIC_API_KEY` and ignores subscription login.** So the reproducibility recipe the plan
-previously assumed is unavailable.
+§8 pins our `ema`/`rma`/`rsi`/`atr` to a Pine oracle by golden fixtures. That was previously
+justified by "the two emissions must agree". With one emission the reason is different and
+arguably stronger:
 
-What we can still do:
+**The agent reads Pine from the Library and implements it in Python.** If our `ta.ema` seeds
+differently from Pine's, the agent faithfully implements a Library concept and gets a strategy
+that is not the concept. The fixtures are what make "implement this Library idea in Python"
+mean something precise rather than approximately.
+
+### 14.6 What "no API keys" costs, and what it does not
+
+One real consequence, stated rather than discovered: **`--bare` requires `ANTHROPIC_API_KEY`
+and ignores subscription login.** So the reproducibility recipe earlier revisions assumed is
+unavailable.
+
+What still works:
 
 - `--mcp-config <file>` — pin the exact server set per run, and check `system/init` for
   `mcp_servers` / `mcp_server_errors` to fail fast when one does not load.
 - `--settings <file>` and `--append-system-prompt-file` — pin instructions explicitly.
-- `--allowedTools` scoped to the MCP tools plus `Read`/`Edit` — with the engine behind MCP,
-  the agent barely needs Bash, which tightens the surface considerably.
-- `--permission-mode` and `--max-turns` per §17.
+- `--allowedTools` scoped to the MCP tools plus `Read`/`Edit`.
+- `--permission-mode`, `--max-turns` (§17).
 
-What we cannot do: guarantee a stray user-level hook, skill or personal MCP server on the
-owner's machine did not influence a run. So **record what was actually resolved** — session id,
-model, runtime version, and the `system/init` server list — into the library (§16) and treat it
-as provenance rather than a reproducibility guarantee. The engine stays deterministic (§7);
-the agent layer is logged, not reproduced.
+What does not: we cannot guarantee a stray user-level hook, skill or personal MCP server did
+not influence a run. So **record what actually resolved** — session id, model, runtime version,
+the `system/init` server list — into the library (§16) and treat it as *provenance*, not a
+reproducibility guarantee. The engine stays deterministic (§7); the agent layer is logged, not
+reproduced.
 
-Spend is also not enforceable client-side without the API path. `--max-turns` and wall-clock
-remain; the `agent_spend` ceiling in §17 becomes advisory.
+Spend is also not enforceable client-side without the API path, so §17's `agent_spend` ceiling
+becomes advisory. `--max-turns` and wall-clock still bite.
 
-### 14.6 Runtime specifics
+### 14.7 Runtime
 
-**Claude Code** (primary):
+**Claude Code** — the supported runtime.
+
 - `claude -p "<prompt>"` non-interactive; `--output-format stream-json` with
   `--include-partial-messages` for streaming into the sidebar
-- `--resume <session-id>` / `--continue` — this is what makes §15.1's conversation continue
-  across restarts; transcripts are `.jsonl` and persist as run artifacts
-- `--json-schema` to enforce the strategy-spec envelope
+- `--resume <session-id>` / `--continue` — what makes §15.1's conversation continue across
+  restarts; transcripts are `.jsonl` and persist as run artifacts
+- `--json-schema` to enforce structured envelopes
 - SIGINT ends a turn cleanly (§15.4's cancel); SIGTERM leaves it unfinished
-- Piped stdin is capped at 10 MB — attachments go by path, never piped
-- The Python Agent SDK is preferred for the interactive sidebar; the engine is Python, so
-  there is no language boundary
+- Piped stdin capped at 10 MB — attachments go by path, never piped
+- The Python Agent SDK is preferred for the interactive sidebar: the engine is Python, so there
+  is no language boundary
 
-**Codex CLI** (secondary):
-- `codex exec --json`, `--output-schema`, `codex exec resume --last`
-- `AGENTS.md` for instructions, `.codex/config.toml` for MCP
-- **Known risk:** MCP calls under `codex exec` have been reported auto-cancelled with
-  non-interactive approval, with workarounds that disable sandboxing. Verify before relying on
-  MCP under Codex — and since this design is MCP-first, that verification gates Codex support
-  entirely.
+**Codex — deferred, not designed around.** MCP calls under `codex exec` have been reported
+auto-cancelled with non-interactive approval, and this design is MCP-first, so Codex support is
+gated on that being fixed or worked around. Not a priority. The provider adapter (§15) should
+keep the runtime swappable so adding it later is cheap, but nothing in the plan should wait on
+it.
 
-### 14.7 Project memory
+### 14.8 Project memory
 
 ```
-CLAUDE.md / AGENTS.md     harness contract, §4.5 rule, forbidden calls, repo map
+CLAUDE.md                 harness contract, §4.5 rule, forbidden calls, repo map
 .claude/skills/
-  strategy-spec/          the spec schema + worked examples, both emissions
-  pine-emission/          Library-grounded Pine conventions, plot/marker contract
+  signal-blocks/          the slot contract, worked examples, the static validator's rules
   indicators/             our semantics, parity fixtures, accumulated gotchas
-  exemplars/              validated specs + script pairs, tagged by concept family
+  exemplars/              validated signal blocks, tagged by concept family
 .mcp.json                 luxalgo, edge-stats, prop-firm-sim, quantor-engine
 ```
 
-Start the exemplar corpus with ~10 hand-written spec/script triples; append every candidate
-that validates and produces sane trade counts. **The failure taxonomy (§9) now has two
-columns** — which emission failed, and how — and that distinction is what tells you whether a
-problem lives in the spec, the Pine conventions, or the Python contract.
+Start the exemplar corpus with ~10 hand-written blocks; append every candidate that validates
+and produces sane trade counts. The failure taxonomy (§9) is a query over the rejected ones.
 
 ## 15. The application — the conversation is the product
 
@@ -1266,15 +1273,15 @@ before the turn runs:
 
 This is the cycle the whole system exists to serve:
 
-1. **Brainstorm.** "What about order blocks on the London open?" The agent pulls the concept
-   and its real Pine source from the Library over MCP, and — before any code — asks Edge Stats
-   whether the setup actually occurs often enough to matter. A concept that fires eleven times
-   a year is worth knowing about now, not after an afternoon of work.
-2. **Build.** The agent writes a strategy spec, emits the Pine and Python scripts from it, and
-   saves a version.
-3. **Test.** `backtest_run` on the engine. Metrics come back into the conversation.
-4. **Look.** The Pine goes on the chart. The owner sees where it actually entered and exited
-   (§14.4). This step catches what metrics cannot.
+1. **Brainstorm.** "What about order blocks on the London open?" The agent reads the concept
+   and its real Pine source from the Library over MCP to learn what it *is*, and — before any
+   code — asks Edge Stats whether the setup actually occurs often enough to matter. A concept
+   that fires eleven times a year is worth knowing now, not after an afternoon of work.
+2. **Build.** The agent writes the Python signal block and saves a version.
+3. **Test.** `backtest_run`. Metrics come back into the conversation.
+4. **Look.** `chart_apply` draws **that run's own** entries, exits and stops on the chart. The
+   owner sees where it actually traded (§14.4) — no second implementation, so nothing to
+   disagree.
 5. **Refine.** "The stops are too tight in the Asian session." A new version, parent recorded.
 6. **Repeat**, then validate the survivors properly (§12) rather than the first thing that
    looked good.
@@ -1285,7 +1292,7 @@ meant* — and a candidate needs both before it is worth optimizing.
 ### 15.2 What the agent is given each turn
 
 An open question worth probing early (§19, Probe 7), because it decides both cost and quality.
-The full transcript grows without bound and eventually dominates the token bill; too little and
+The full transcript grows without bound and eventually dominates the context; too little and
 the agent re-proposes something rejected three days ago.
 
 The likely shape: a **compact strategy state** regenerated from the library each turn —
@@ -1293,10 +1300,10 @@ current strategies, their spec, parameters, latest metrics, and a one-line reaso
 rejected variant — plus the last few turns verbatim, plus retrieval into the older transcript
 when a message refers back to something specific.
 
-**The two scripts should usually not be in context.** The spec is the strategy (§14.3); the
-emitted Pine and Python are derived artifacts the agent can fetch with `strategy_get` when it
-actually needs to edit one. Keeping both scripts in every turn's context is the fastest way to
-an unaffordable conversation. Measure before committing.
+**The signal block itself usually should not be in context.** The description plus the
+parameter spec is enough to reason about a strategy; the agent fetches the code with
+`strategy_get` when it actually needs to edit it. Carrying every strategy's source in every
+turn is the fastest route to an unaffordable conversation. Measure before committing.
 
 ### 15.3 Layout
 
@@ -1326,8 +1333,8 @@ exactly as it was. **Cancel maps to SIGINT** (ends the turn cleanly) rather than
 A run launched from a conversation is linked to the turn that launched it, so "what was I
 trying when I ran this" is answerable from either direction.
 
-**Ceilings, any one of which stops a run** (§17): wall clock · agent spend (from
-`total_cost_usd`) · evaluations.
+**Ceilings, any one of which stops a run** (§17): wall clock · evaluations · agent turns.
+Spend is not enforceable without the API path (§14.6), so it is advisory only.
 
 ### 15.5 Shell
 
@@ -1479,7 +1486,7 @@ validation:
     - {metric: <...>, op: <...>, value: <...>}
 
 agent_runtime:
-  provider: <claude_code|codex|api>
+  provider: claude_code               # §14.7 — Codex deferred, no API path
   model: <str>
   bare_mode: <bool>
   permission_mode: <...>
@@ -1493,8 +1500,8 @@ integrity:
 
 ceilings:
   wall_clock: <duration>
-  agent_spend: <amount>
   evaluations_total: <int>
+  agent_max_turns: <int>              # enforceable; spend is not (§14.6)
 
 generation:
   repair_retries: <int>
@@ -1520,7 +1527,8 @@ Note what is *gone* from rev 3's policy: `execution_resolution` (no 1s layer),
 app/
   api/           FastAPI — run control, series feed, agent event stream
   ui/            Vela chart host, agent sidebar, results panel
-  agent/         provider adapter (claude code / codex / api), attachments
+  agent/         Claude Code session host, MCP config, attachments   [§14]
+  mcp/           the QUANTOR engine MCP server                        [§14.2]
 engine/
   store/         tick CSV ingest, Parquet store, bar construction, quality checks
                  ingest.py exists — reads the owner's format, verifies the time unit
@@ -1569,11 +1577,8 @@ never applied to custom arrays anyway (it is a provider `limit` concern); 4M bar
 synthetic ticks are uniformly distributed, and real ones cluster hard around news, which
 changes bar-construction and fill-loop cache behaviour.
 
-**Probe 4 — agent runtime. Survives.** One `claude -p` round trip with `--mcp-config` pointing
-at LuxAlgo MCP, `--json-schema` enforcing a trivial envelope, and `--allowedTools` scoped to
-`Bash(pytest *)`. Confirm: schema enforcement works, MCP loads (check `system/init`),
-`total_cost_usd` is present, and permission scoping actually blocks what it should. Repeat for
-`codex exec --json --output-schema`, watching for the MCP-under-exec issue.
+**~~Probe 4 — agent runtime.~~ Folded into Probe 9**, which tests the same things against the
+MCP-first design (§14).
 
 **Probe 5 — real tick CSV ingest. Partly done.** `engine/store/ingest.py` reads the owner's
 format and `tests/store/` covers it. What still needs the owner's actual files, not a sample:
@@ -1605,14 +1610,16 @@ plumbing before building on it:
    agent calls it rather than reaching for Bash. If it works around the tools, the tool design
    is wrong and better prompting will not fix it.
 3. Confirm `--allowedTools` scoped to MCP plus `Read`/`Edit` actually blocks what it should.
-4. **Repeat under `codex exec`.** MCP calls there have been reported auto-cancelled under
-   non-interactive approval; since this design is MCP-first, that result gates Codex support
-   entirely — it is not a minor compatibility note.
+4. Confirm `--resume` restores a conversation with its MCP servers intact — §15.1's whole
+   premise is that the conversation continues across restarts.
 
-**Probe 7 — conversational strategy loop (new).** The centrepiece feature (§15.1) is a
-conversation that produces and refines strategies over many turns, so probe the loop rather
-than a single generation. In one session: brainstorm a concept, have the agent write a signal
-block, backtest it, then ask for three successive refinements.
+Codex is explicitly out of scope for this probe (§14.7).
+
+**Probe 7 — conversational strategy loop.** The centrepiece feature (§15.1) is a conversation
+that produces and refines strategies over many turns, so probe the loop rather than a single
+generation. In one session: brainstorm a concept against the Library and Edge Stats, have the
+agent write a signal block, backtest it, view it on the chart, then ask for three successive
+refinements.
 
 What this measures:
 
@@ -1703,15 +1710,21 @@ owner implements on their own execution path. This is also why MT5 is the refere
 (§0): the numbers this system produces are only useful if they predict what the owner's EA
 actually does.
 
-**Code export to MQL5 or Pine Script was considered and cut.** The reasoning is worth keeping,
-because the idea will come back. Under AI generation an export is a *claim*, not a
-translation: a deterministic transpiler fails reproducibly, while an LLM translation fails
-*plausibly* — code that reads correctly, compiles, runs, and computes something subtly
-different. Making that safe needs a parity harness measuring generated code against the Python
-original bar-by-bar, plus a generate-check-repair loop for when they disagree. That is a
-substantial subsystem whose entire purpose is making another subsystem trustworthy, and it
-sits downstream of everything in §20. Revisit only once the engine and validation are sound,
-and only with the parity harness built first.
+**The system emits Python and nothing else** (§14.3). MQL5 export, and later Pine Script
+alongside Python, were both considered and cut. The reasoning is worth keeping because the idea
+recurs:
+
+Any second emission of "the same" strategy is a *claim*, not a translation. A deterministic
+transpiler fails reproducibly; an LLM writing a second version fails **plausibly** — code that
+reads correctly, runs, and computes something subtly different. Making that safe needs a parity
+harness comparing the two bar-by-bar plus a generate-check-repair loop for when they disagree:
+a substantial subsystem whose entire purpose is making another subsystem trustworthy.
+
+One emission has none of that. It also made chart verification stronger rather than weaker
+(§14.4) — the chart draws the engine's own trade list, so what you see is what was measured.
+
+Revisit only if running strategies somewhere else becomes a goal, and only with the parity
+harness built first.
 
 Trade Journal reconciles live results against backtest. **The gap between them is the real
 slippage model** — feed it back into §17's `execution.slippage_params` so the backtest stops

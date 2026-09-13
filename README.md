@@ -42,11 +42,11 @@ owner's own MT5 backtests as the verification ground truth.
 **Data in:** your own CSVs — ticks or bars, any instrument, any precision, each with its own
 GMT offset. The file's resolution decides which strategy timeframes it can serve.
 
-**The agent is MCP-first** (plan §14): Claude Code or Codex CLI on the owner's own
-subscription — no API keys — talking to the LuxAlgo Library, Edge Stats, Prop Firm Sim, and
-QUANTOR's own engine as MCP servers. Each strategy is emitted as **two scripts from one spec**:
-Pine Script for the chart, Python for the engine. Python owns the numbers; Pine is what you
-look at.
+**The agent is MCP-first, with no API keys** (plan §14): Claude Code on your own
+subscription, talking to the LuxAlgo Library, Edge Stats, Prop Firm Sim, and QUANTOR's own
+engine as MCP servers. It reads Library Pine source to *understand* a concept and emits **one
+artifact — a Python signal block**. The chart then draws that run's own entries and exits, so
+what you look at is exactly what was measured.
 
 **Output is parameters, not orders** — the strategy definition and its parameters, which you
 run on your own execution path. See plan §22.
