@@ -18,16 +18,20 @@ owner's own MT5 backtests as the verification ground truth.
 |---|---|
 | `trading-agent-plan.md` | Design plan, rev 4 |
 | `engine/indicators/` | Wilder-family indicators, validated against a PineTS oracle |
-| `tests/golden/` | Indicator parity fixtures + tests (6 passing) |
+| `engine/store/` | Tick CSV ingest — reads the real feed format, verifies the time unit |
+| `tests/` | 17 passing: indicator parity + ingest |
 | `tools/pinets_oracle/` | Dev-only fixture generator (AGPL, never shipped) |
 | `bench/` | Reproduces every `[measured]` number in the plan |
 
 ## Quick start
 
     pip install numpy pandas numba pyarrow pytest
-    python3 -m pytest tests/golden/ -v     # indicator parity
+    python3 -m pytest tests/ -v            # indicator parity + tick ingest
     python3 bench/bench_indicators.py      # signal-pass cost
     python3 bench/bench_ticks.py           # ingest, bars, tick-resolution fills
+
+Strategies export to **MQL5** (to run) and **Pine** (to view on TradingView), each with a
+parity verdict rather than on trust — see plan §21.
 
 ## Licence note
 
