@@ -183,15 +183,75 @@ Recorded because the *method* of the error matters more than the error.
 
 ### Engine (Python)
 
-| Component | Choice | Role |
-|---|---|---|
-| Arrays / math | **numpy** | all series computation |
-| Hot loops | **numba** (`njit`) | bar construction, fill engine |
-| Columnar store | **pyarrow** + Parquet | tick and bar persistence |
-| Tabular / joins | **pandas** or **polars** | ingest, reporting (pick one, §21) |
-| Optimization | **Optuna** | TPE, NSGA-II, grid, random |
-| Property tests | **hypothesis** | engine invariants (§10.4) |
-| API | **FastAPI** + uvicorn | serves the UI and run control |
+| Component | Choice | Licence | Role |
+|---|---|---|---|
+| Arrays / math | **numpy** | BSD | all series computation |
+| Hot loops | **numba** (`njit`) | BSD | bar construction, sweep fill engine |
+| **Tick execution** | **NautilusTrader** | LGPL-3.0+ | `real_ticks` mode — fills, margin, swap, FX (§3.1) |
+| Columnar store | **pyarrow** + Parquet | Apache-2.0 | tick and bar persistence |
+| Tabular / joins | **pandas** or **polars** | BSD / MIT | ingest, reporting (pick one, §21) |
+| Optimization | **Optuna** 5.x | MIT | TPE, NSGA-II, pruning, trial storage |
+| Metrics | **QuantStats** / **empyrical** | Apache-2.0 | Sharpe, Sortino, Calmar, drawdown |
+| Property tests | **hypothesis** | MIT | engine invariants (§10.1) |
+| API | **FastAPI** + uvicorn | MIT | serves the UI and run control |
+
+### 3.1 Build versus buy — the line, and why it falls there
+
+The rule: **buy where the problem is standard, build where our requirements are unusual.**
+Each side of the line is a measurement, not a preference.
+
+**Bought.**
+
+- **NautilusTrader for tick-resolution execution.** Rust core, nanosecond event-driven,
+  simulated FX venue, margin accounts, configurable fill/fee/latency models, rollover-interest
+  module. Its instrument model already carries `price_increment`, `lot_size`,
+  `min/max_quantity` and `margin_init/maint` — the fields §5 needs. Verified in this
+  environment `[measured]`: 200,000 quote ticks through a margin account ran in 1.26 s, the
+  entry filled at the ask (directional spread applied correctly), commission charged from the
+  instrument's own fee model.
+
+  This replaces the largest remaining build item. A tick engine owning margin, swap, OCA, FX
+  conversion, latency and stop-out is weeks of work and a permanent correctness liability.
+  Buying it is the right trade even at the cost of a heavy dependency.
+
+- **Optuna for search.** TPE, NSGA-II, pruning and trial storage, all of which we would
+  otherwise write. Our `ParamSpec` and objective guards (§11) stay as a thin layer over it —
+  the guards are the part with real value.
+
+- **QuantStats / empyrical for metrics.** Hand-rolling Sharpe, Sortino and Calmar is exactly
+  the commodity work not to do; `engine/backtest/metrics.py` should become a thin adapter.
+
+**Built, and why nothing off the shelf substitutes.**
+
+- **The store (§4).** Nothing reads the owner's CSV with per-import GMT offset, precision
+  detected from the file, and the source-resolution rule. Small, and entirely ours.
+- **The indicator layer (§8).** We need Pine/MT5-exact semantics pinned to golden fixtures.
+  TA-Lib and pandas-ta differ from both in documented ways, and the whole point of §8 is that
+  the semantics are pinned rather than inherited. Sixty lines plus a fixture.
+- **The bar-mode sweep engine (§7).** The decisive measurement: NautilusTrader runs **159k
+  ticks/s**, our numba loop **390M ticks/s**. Not like-for-like — Nautilus runs a full order
+  lifecycle, event bus and portfolio where ours does SL/TP — but the consequence is what
+  matters. One year of the owner's ticks (~38M) is **~4 minutes** on Nautilus versus ~0.1 s on
+  ours, so a 10,000-evaluation sweep on Nautilus would take **27 days**.
+- **Fold geometry (§12).** Entry-attribution, purge-from-trade-duration and the nested search
+  are not what general CV libraries do.
+
+**Rejected, with reasons.** All from the owner's comparison article.
+
+| Library | Why not |
+|---|---|
+| **VectorBT** | Fastest of the eight and the closest fit, but **Apache-2.0 + Commons Clause**: you may not sell a product whose value derives substantially from it. Also bar-based with no FX lot/margin/swap model, so the hard part stays ours |
+| **Backtrader** | GPLv3, and **last release 2023-04-19**. Pure-Python event loop, so slower again than Nautilus with none of its execution modelling |
+| **Backtesting.py** | AGPL-3.0 — the licence class this plan deliberately left (§2) — single-asset, bar-based, no FX lots or margin |
+| **Zipline Reloaded** | US equities on daily bars behind a bundle ingestion pipeline. Wrong market, wrong resolution |
+| **bt** | Portfolio rebalancing across many assets. Wrong shape entirely |
+| **QuantConnect / LEAN** | C# core, cloud-oriented, heavy lock-in for a local-first tool |
+| **pysystemtrade** | GPL, and opinionated around one specific futures methodology — you trade its way or fight it |
+| **Fastquant** | A wrapper for quick looks, not an engine |
+
+Two things the comparison article gets wrong for our purposes: it does not mention
+NautilusTrader at all, and it rates Backtrader the realism pick without noting it has been
+unmaintained since 2023.
 
 ### External (kept from rev 3)
 
@@ -509,11 +569,17 @@ parameters (§13).
 MT5's Strategy Tester exposes an explicit accuracy/speed trade-off instead of a hidden
 assumption. Adopt it directly, with MT5's vocabulary, because the owner already reasons in it.
 
-| Mode | Signals evaluated | Fills resolved against | Cost (1 yr) | Use |
+| Mode | Engine | Fills resolved against | Cost (1 yr) | Use |
 |---|---|---|---|---|
-| **`real_ticks`** | bar close on signal TF | **real tick stream** | ~0.2 s `[measured]` | **System of record.** Every reported result |
-| **`m1_ohlc`** | bar close on signal TF | M1 OHLC, assumed intrabar path | ~0.05 s | Spans with missing tick data |
-| **`open_prices`** | bar open on signal TF | bar open | ~7 ms `[measured]` | **Optimizer sweeps** |
+| **`real_ticks`** | **NautilusTrader** | real tick stream, full order lifecycle | ~4 min `[measured]` | **System of record.** Every reported result |
+| **`m1_ohlc`** | ours (numba) | M1 OHLC, assumed intrabar path | ~0.1 s | Spans with missing tick data |
+| **`open_prices`** | ours (numba) | bar open | **2.2 ms** `[measured]` | **Optimizer sweeps** |
+
+**Each mode now has an owner (§3.1), and the cost column is why.** The cheap modes are our
+numba engine; `real_ticks` is NautilusTrader, which is ~2,450x slower per tick but models the
+things that decide whether a number is real — margin, swap, OCA, latency, FX conversion. The
+ratio is the architecture: sweep thousands of configurations in the cheap mode, revalidate the
+handful of survivors in the accurate one.
 
 **Availability follows the source (§4.6), not preference.** `real_ticks` requires a tick
 source; `m1_ohlc` requires M1 or finer; `open_prices` works on anything at or below the
@@ -544,10 +610,14 @@ the owner has real ticks, and synthesising ticks from M1 bars manufactures fills
 ### Design
 
 ```
-PASS 1 — SIGNAL                        PASS 2 — EXECUTION
-numpy/numba on signal-TF bars     →    numba fill engine on real ticks
-emits INTENTS with timestamps          resolves fills, P&L, accounting
+PASS 1 — SIGNAL                   PASS 2 — EXECUTION (two engines, one contract)
+numpy/numba on signal-TF bars  →  sweep:     our numba bar engine     2.2 ms
+emits INTENTS with timestamps     validate:  NautilusTrader on ticks  ~4 min
 ```
+
+**One intent contract, two consumers.** Pass 1 does not know which engine will run its
+intents; that is a per-run choice (§6). The adapter that feeds intents into NautilusTrader is
+ours, and it is the piece to get right — the rest of the tick engine is bought (§3.1).
 
 This is how MT5 works, and it is no longer an exotic architecture. Pass 1 is pure, vectorized
 and stateless. Pass 2 is a single sequential pass that owns all broker emulation.
@@ -776,10 +846,20 @@ right, the equity curve looked right, and they were inconsistent with each other
 That is the whole argument for §10.1 in one example. With MT5 reconciliation no longer a build
 gate (§10.2), these invariants are the primary defence, and they earn it.
 
-### 10.4 Differential testing across modes
+### 10.4 Differential testing — and the reference we got back
 
 `real_ticks` vs `m1_ohlc` vs `open_prices` on the same strategy should differ in a bounded,
 explainable direction (§6). Assert the direction; investigate anything outside it.
+
+**Adopting NautilusTrader partly restores what dropping MT5 reconciliation cost us (§10.2).**
+The two engines are independent implementations by different authors, and on a strategy with
+no intrabar ambiguity — stops and targets far apart relative to bar range — they should agree
+closely on the same trades. Where they diverge, one of them has a bug, and that is a real
+external check rather than an internal consistency argument.
+
+It is not as strong as MT5 reconciliation: Nautilus is not the platform the owner trades on,
+so agreement proves consistency rather than realism. But an independent engine is considerably
+better than no reference at all.
 
 ### 10.5 Reproducibility
 
@@ -1346,9 +1426,10 @@ engine/
   instruments/   spec registry (§5), FX conversion pairs
   indicators/    numpy/numba ta.* + parity fixtures          [§8]
   signal/        harness, signal-block runner, static validator [PASS 1]
-  backtest/      bar-mode fill engine + metrics — EXISTS       [PASS 2]
-  execution/     tick-mode fill engine, margin, swap, OCA      [PASS 2]
-  optimize/      search modes, objectives, param specs — EXISTS
+  backtest/      bar-mode fill engine + metrics — EXISTS       [PASS 2 sweep]
+  execution/     NautilusTrader adapter: intents -> orders,    [PASS 2 validate]
+                 instrument spec -> Nautilus instrument, results back
+  optimize/      param specs + objective guards — EXISTS; Optuna backend pending
   validate/      fold geometry — EXISTS; MC modes, PBO/DSR, verdicts pending
   library/       SQLite catalogue + content-addressed artifact store      [§16]
 tests/
@@ -1409,6 +1490,19 @@ format and `tests/store/` covers it. What still needs the owner's actual files, 
 It remains available as a manual cross-check (§10.2). The cost of dropping it is stated there
 and should be read before trading a number this engine produced.
 
+**Probe 8 — NautilusTrader adapter (new, and the one that gates §3.1).** The library is
+verified to work (§3.1); what is unproven is *our* mapping onto it. In order:
+
+1. Map one §5 instrument spec onto a Nautilus instrument — `price_increment`, `lot_size`,
+   `min/max_quantity`, `margin_init/maint`, fees — and confirm nothing in §5 has no home.
+   Anything that does not map is a gap to design around, not to ignore.
+2. Feed the owner's real ticks through `QuoteTickDataWrangler` and confirm the tick count,
+   timestamps and spreads survive the round trip.
+3. Run the **same** signal block through both engines on a strategy with wide stops (no
+   intrabar ambiguity) and compare trade-by-trade (§10.4). Divergence here is the finding.
+4. Time a full year on the owner's data. The ~4 min figure is from synthetic EUR/USD ticks;
+   real data is burstier.
+
 **Probe 7 — conversational strategy loop (new).** The centrepiece feature (§15.1) is a
 conversation that produces and refines strategies over many turns, so probe the loop rather
 than a single generation. In one session: brainstorm a concept, have the agent write a signal
@@ -1445,13 +1539,16 @@ What this measures:
    guesswork. Everything built after this point writes to it.
 5. **Indicator layer + golden fixtures** (§8). Cheap, and the foundation for every signal block.
 6. **Harness + signal-block contract + static validator** (§9).
-7. **Execution engine** (§7, §10), with §10.1 invariants from the first commit, not bolted on
-   afterwards. They carry more weight now that MT5 reconciliation is not a gate (§10.2).
+7. **Execution: the NautilusTrader adapter** (§3.1, §7) — Probe 8 first. The bar-mode sweep
+   engine already exists with its §10.1 invariants; this step is the `real_ticks` path, and it
+   is an integration rather than an engine. Once both run, §10.4's differential test becomes
+   the standing check that neither has drifted.
 8. **Early agent-hypothesis test.** Before the UI, before the optimizer: with the slice from
    step 0, have the agent generate ~20 signal blocks and read the failure modes. §9 says the
    failure taxonomy is month one's highest-value output — this is where that becomes true. Rev 3
    put the agent last and so could not have it before month six.
-9. **Optimization + validation** (§11, §12).
+9. **Optimization + validation** (§11, §12) — put Optuna behind the existing `ParamSpec` and
+   `QuantStats` behind `metrics.py` (§3.1) rather than extending the hand-rolled versions.
 10. **Chart + results panel + library UI** (§15, §16).
 11. **The conversation** (§15.1) — Probe 7, then the chat itself. Last to build, because it is
     the easiest part and the most dangerous to trust, and because a chat that proposes

@@ -26,6 +26,7 @@ owner's own MT5 backtests as the verification ground truth.
 | `engine/optimize/` | Grid and random search, objectives with guards |
 | `engine/validate/` | Fold geometry, walk-forward |
 | `bench/demo_loop.py` | End-to-end: signal → backtest → optimize → walk-forward |
+| `bench/probe_nautilus.py` | Verifies NautilusTrader for tick-mode execution (§3.1) |
 | `tests/` | 138 passing |
 | `tools/pinets_oracle/` | Dev-only fixture generator (AGPL, never shipped) |
 | `bench/` | Reproduces every `[measured]` number in the plan |
@@ -40,6 +41,11 @@ owner's own MT5 backtests as the verification ground truth.
 
 **Data in:** your own CSVs — ticks or bars, any instrument, any precision, each with its own
 GMT offset. The file's resolution decides which strategy timeframes it can serve.
+
+**Two execution engines, one contract** (plan §3.1, §6). Parameter sweeps run on a numba
+bar engine measured at 2.2 ms per evaluation; survivors are revalidated on **NautilusTrader**
+at real-tick fidelity with margin, swap and FX. Buying the tick engine removed the largest
+remaining build item.
 
 **Output is parameters, not orders** — the strategy definition and its parameters, which you
 run on your own execution path. See plan §22.
