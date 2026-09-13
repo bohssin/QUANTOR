@@ -22,23 +22,27 @@ owner's own MT5 backtests as the verification ground truth.
 | `trading-agent-plan.md` | Design plan, rev 4 |
 | `engine/indicators/` | Wilder-family indicators, validated against a PineTS oracle |
 | `engine/store/` | CSV ingest — ticks or bars, precision and resolution read from the file |
-| `tests/` | 30 passing: indicator parity + ingest |
+| `engine/backtest/` | Bar-mode fill engine + metrics |
+| `engine/optimize/` | Grid and random search, objectives with guards |
+| `engine/validate/` | Fold geometry, walk-forward |
+| `bench/demo_loop.py` | End-to-end: signal → backtest → optimize → walk-forward |
+| `tests/` | 138 passing |
 | `tools/pinets_oracle/` | Dev-only fixture generator (AGPL, never shipped) |
 | `bench/` | Reproduces every `[measured]` number in the plan |
 
 ## Quick start
 
     pip install numpy pandas numba pyarrow pytest
-    python3 -m pytest tests/ -v            # indicator parity + tick ingest
+    python3 -m pytest tests/ -v            # 138 tests
+    python3 bench/demo_loop.py             # the whole loop, end to end
     python3 bench/bench_indicators.py      # signal-pass cost
     python3 bench/bench_ticks.py           # ingest, bars, tick-resolution fills
 
 **Data in:** your own CSVs — ticks or bars, any instrument, any precision, each with its own
 GMT offset. The file's resolution decides which strategy timeframes it can serve.
 
-**Export:** the agent writes MQL5 (to run) or Pine Script (to view on TradingView) on request.
-Every export carries a measured parity verdict — an AI translation is a claim until checked.
-See plan §22.
+**Output is parameters, not orders** — the strategy definition and its parameters, which you
+run on your own execution path. See plan §22.
 
 ## Licence note
 
