@@ -1,0 +1,12 @@
+{
+  "oracle": "pinets@0.9.33",
+  "bars": 5000,
+  "series": [
+    "sma20",
+    "ema20",
+    "rma20",
+    "rsi14",
+    "atr14"
+  ],
+  "note": "empty cell = na. Values are shortest round-trip float64 reprs (lossless)."
+}

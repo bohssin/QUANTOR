@@ -1,0 +1,7 @@
+{
+  "name": "pinets-oracle",
+  "private": true,
+  "type": "module",
+  "description": "Dev-only golden-fixture generator. See plan §8.2. NEVER shipped.",
+  "dependencies": { "pinets": "0.9.33" }
+}
