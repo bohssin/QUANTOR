@@ -187,7 +187,7 @@ Recorded because the *method* of the error matters more than the error.
 |---|---|---|---|
 | Arrays / math | **numpy** | BSD | all series computation |
 | Hot loops | **numba** (`njit`) | BSD | bar construction, sweep fill engine |
-| **Tick execution** | **NautilusTrader** | LGPL-3.0+ | `real_ticks` mode — fills, margin, swap, FX (§3.1) |
+| Exploration / stats | **VectorBT** (+ `plotly<6`) | Apache-2.0 + CC | metrics, plotting, cross-check (§3.1) |
 | Columnar store | **pyarrow** + Parquet | Apache-2.0 | tick and bar persistence |
 | Tabular / joins | **pandas** or **polars** | BSD / MIT | ingest, reporting (pick one, §21) |
 | Optimization | **Optuna** 5.x | MIT | TPE, NSGA-II, pruning, trial storage |
@@ -195,63 +195,80 @@ Recorded because the *method* of the error matters more than the error.
 | Property tests | **hypothesis** | MIT | engine invariants (§10.1) |
 | API | **FastAPI** + uvicorn | MIT | serves the UI and run control |
 
-### 3.1 Build versus buy — the line, and why it falls there
+### 3.1 Build versus buy
 
-The rule: **buy where the problem is standard, build where our requirements are unusual.**
-Each side of the line is a measurement, not a preference.
+The owner uses this personally and does not sell it, so copyleft and
+Commons-Clause restrictions are not constraints. Margin, swap and FX lot
+modelling are explicitly not priorities — **the priority is finding profitable
+strategies**, which means parameter search and honest validation.
 
-**Bought.**
+That settles the earlier NautilusTrader decision: it was adopted for tick-level
+margin/swap/FX execution, and that requirement is withdrawn. **Dropped.**
 
-- **NautilusTrader for tick-resolution execution.** Rust core, nanosecond event-driven,
-  simulated FX venue, margin accounts, configurable fill/fee/latency models, rollover-interest
-  module. Its instrument model already carries `price_increment`, `lot_size`,
-  `min/max_quantity` and `margin_init/maint` — the fields §5 needs. Verified in this
-  environment `[measured]`: 200,000 quote ticks through a margin account ran in 1.26 s, the
-  entry filled at the ask (directional spread applied correctly), commission charged from the
-  instrument's own fee model.
+**Chosen from the comparison article: VectorBT** over Backtesting.py.
+Backtesting.py is a per-bar Python loop, single-asset, with a weaker optimizer;
+VectorBT is numba-vectorized, built for exactly the parameter sweeps this
+project runs, and ships 28 portfolio metrics and a plotting suite. Verified
+here on 40,000 bars `[measured]`: `sl_stop` / `sl_trail` / `tp_stop`, `fees`,
+`slippage`, and a full `stats()` table including profit factor, expectancy,
+Sharpe, Sortino, Calmar and win rate.
 
-  This replaces the largest remaining build item. A tick engine owning margin, swap, OCA, FX
-  conversion, latency and stop-out is weeks of work and a permanent correctness liability.
-  Buying it is the right trade even at the cost of a heavy dependency.
+**Where it fits, and where it does not.** Two measurements decide this.
 
-- **Optuna for search.** TPE, NSGA-II, pruning and trial storage, all of which we would
-  otherwise write. Our `ParamSpec` and objective guards (§11) stay as a thin layer over it —
-  the guards are the part with real value.
+- **Speed: 89.7 ms per combination, against our numba engine's 2.2 ms** — 41x
+  slower, on a *simpler* strategy (percentage stops rather than ATR-based). For
+  the sweep hot path the engine we already have is faster and is covered by 138
+  tests.
+- **A silent correctness trap.** Asking VectorBT for a 5x5 indicator grid
+  returns **5 columns, not 25** — `param_product=True` applies within one
+  indicator's parameters, not across two separately-run indicators, so you get
+  the diagonal `(10,40), (15,50), (20,60), (25,70), (30,80)`. No warning. The
+  results table looks correct, every row correctly labelled, and it silently
+  contains a fraction of the configurations you asked for. Reproduce with
+  `bench/probe_vectorbt.py`. This is the same class of failure as rev 3's
+  PineTS input-caching bug (§2), and it lands on the optimizer again.
 
-- **QuantStats / empyrical for metrics.** Hand-rolling Sharpe, Sortino and Calmar is exactly
-  the commodity work not to do; `engine/backtest/metrics.py` should become a thin adapter.
+So VectorBT is adopted as the **exploration and analysis layer**, not the sweep
+engine:
 
-**Built, and why nothing off the shelf substitutes.**
+| Use | Why |
+|---|---|
+| Its `stats()` suite | Replaces hand-rolled `metrics.py`, which was commodity work |
+| Quick exploration of an idea | Better ergonomics than wiring a full run |
+| Plotting and portfolio analysis | Genuinely good, and we would not write it |
+| **Independent cross-check (§10.4)** | Two implementations should agree on a simple strategy. Divergence means one has a bug — the external reference we otherwise lack |
 
-- **The store (§4).** Nothing reads the owner's CSV with per-import GMT offset, precision
-  detected from the file, and the source-resolution rule. Small, and entirely ours.
-- **The indicator layer (§8).** We need Pine/MT5-exact semantics pinned to golden fixtures.
-  TA-Lib and pandas-ta differ from both in documented ways, and the whole point of §8 is that
-  the semantics are pinned rather than inherited. Sixty lines plus a fixture.
-- **The bar-mode sweep engine (§7).** The decisive measurement: NautilusTrader runs **159k
-  ticks/s**, our numba loop **390M ticks/s**. Not like-for-like — Nautilus runs a full order
-  lifecycle, event bus and portfolio where ours does SL/TP — but the consequence is what
-  matters. One year of the owner's ticks (~38M) is **~4 minutes** on Nautilus versus ~0.1 s on
-  ours, so a 10,000-evaluation sweep on Nautilus would take **27 days**.
-- **Fold geometry (§12).** Entry-attribution, purge-from-trade-duration and the nested search
-  are not what general CV libraries do.
+Sweeps, walk-forward and anything whose numbers get reported stay on our engine.
+It also needs `plotly<6` pinned: current VectorBT fails to import against
+plotly 6 (`scattermapbox` was removed).
 
-**Rejected, with reasons.** All from the owner's comparison article.
+**Still built, and why nothing substitutes.**
+
+- **The store (§4)** — nothing reads the owner's CSV with per-import GMT offset,
+  precision detected from the file, and the source-resolution rule.
+- **The indicator layer (§8)** — and this matters *more* now, not less. The agent
+  emits a Pine script and a Python script for the same strategy (§14.3); they
+  agree only if our Python indicators are Pine-exact. The golden fixtures are
+  what make the two outputs comparable at all.
+- **The bar-mode engine (§7)** — 41x faster than VectorBT, and tested.
+- **Fold geometry (§12)** — entry-attribution, purge-from-trade-duration and the
+  nested search are not what general CV libraries do.
+
+**Also adopted:** Optuna (MIT) behind the existing `ParamSpec` for TPE and
+NSGA-II.
+
+**Rejected, with reasons, since the question recurs.**
 
 | Library | Why not |
 |---|---|
-| **VectorBT** | Fastest of the eight and the closest fit, but **Apache-2.0 + Commons Clause**: you may not sell a product whose value derives substantially from it. Also bar-based with no FX lot/margin/swap model, so the hard part stays ours |
-| **Backtrader** | GPLv3, and **last release 2023-04-19**. Pure-Python event loop, so slower again than Nautilus with none of its execution modelling |
-| **Backtesting.py** | AGPL-3.0 — the licence class this plan deliberately left (§2) — single-asset, bar-based, no FX lots or margin |
-| **Zipline Reloaded** | US equities on daily bars behind a bundle ingestion pipeline. Wrong market, wrong resolution |
-| **bt** | Portfolio rebalancing across many assets. Wrong shape entirely |
+| **Backtesting.py** | Per-bar Python loop, single-asset, weaker optimizer. AGPL is fine here, speed is not |
+| **Backtrader** | GPLv3 and **last released 2023-04-19**. The article rates it the realism pick without noting it is unmaintained |
+| **NautilusTrader** | Excellent for tick-level margin/swap/FX — a requirement now withdrawn. Revisit only if live-execution fidelity becomes the goal |
+| **Zipline Reloaded** | Daily US equities behind a bundle pipeline. Wrong market and resolution |
+| **bt** | Portfolio rebalancing across many assets. Wrong shape |
 | **QuantConnect / LEAN** | C# core, cloud-oriented, heavy lock-in for a local-first tool |
-| **pysystemtrade** | GPL, and opinionated around one specific futures methodology — you trade its way or fight it |
+| **pysystemtrade** | Opinionated around one futures methodology — you trade its way or fight it |
 | **Fastquant** | A wrapper for quick looks, not an engine |
-
-Two things the comparison article gets wrong for our purposes: it does not mention
-NautilusTrader at all, and it rates Backtrader the realism pick without noting it has been
-unmaintained since 2023.
 
 ### External (kept from rev 3)
 
@@ -571,15 +588,11 @@ assumption. Adopt it directly, with MT5's vocabulary, because the owner already 
 
 | Mode | Engine | Fills resolved against | Cost (1 yr) | Use |
 |---|---|---|---|---|
-| **`real_ticks`** | **NautilusTrader** | real tick stream, full order lifecycle | ~4 min `[measured]` | **System of record.** Every reported result |
+| **`real_ticks`** | ours (numba) | real tick stream | ~0.1 s `[measured]` | **System of record.** Every reported result |
 | **`m1_ohlc`** | ours (numba) | M1 OHLC, assumed intrabar path | ~0.1 s | Spans with missing tick data |
 | **`open_prices`** | ours (numba) | bar open | **2.2 ms** `[measured]` | **Optimizer sweeps** |
 
-**Each mode now has an owner (§3.1), and the cost column is why.** The cheap modes are our
-numba engine; `real_ticks` is NautilusTrader, which is ~2,450x slower per tick but models the
-things that decide whether a number is real — margin, swap, OCA, latency, FX conversion. The
-ratio is the architecture: sweep thousands of configurations in the cheap mode, revalidate the
-handful of survivors in the accurate one.
+All three run on our engine. Sweep in `open_prices`; report in `real_ticks`.
 
 **Availability follows the source (§4.6), not preference.** `real_ticks` requires a tick
 source; `m1_ohlc` requires M1 or finer; `open_prices` works on anything at or below the
@@ -851,15 +864,13 @@ gate (§10.2), these invariants are the primary defence, and they earn it.
 `real_ticks` vs `m1_ohlc` vs `open_prices` on the same strategy should differ in a bounded,
 explainable direction (§6). Assert the direction; investigate anything outside it.
 
-**Adopting NautilusTrader partly restores what dropping MT5 reconciliation cost us (§10.2).**
-The two engines are independent implementations by different authors, and on a strategy with
-no intrabar ambiguity — stops and targets far apart relative to bar range — they should agree
-closely on the same trades. Where they diverge, one of them has a bug, and that is a real
-external check rather than an internal consistency argument.
+**VectorBT is the independent cross-check (§3.1).** On a simple strategy — percentage stops,
+wide relative to bar range — our engine and VectorBT are independent implementations by
+different authors and should agree closely. Divergence means one has a bug.
 
-It is not as strong as MT5 reconciliation: Nautilus is not the platform the owner trades on,
-so agreement proves consistency rather than realism. But an independent engine is considerably
-better than no reference at all.
+It is weaker than MT5 reconciliation: agreement proves consistency, not realism. But an
+independent implementation is considerably better than an internal-consistency argument alone,
+and it costs one test rather than a subsystem.
 
 ### 10.5 Reproducibility
 
@@ -1056,95 +1067,160 @@ pinned per run and stamped into the artifact.
 
 ---
 
-## 14. Agent runtime — Claude Code / Codex
+## 14. The agent — MCP-first, no API keys
 
-**Primary: an agentic CLI running locally in the project directory. Not an API client.**
+The agent is **Claude Code or Codex CLI running locally**, using the owner's existing
+subscription authentication. **No API keys, no billing integration, no raw API client.**
+Everything it can do beyond reading and writing files, it does through **MCP**.
 
-The agent has filesystem access, bash and native MCP, so much of what would be orchestration
-code is the agent's own tool use:
+That is the whole design in one line, and the rest of this section is its consequences.
 
-| Not code | Instead |
-|---|---|
-| MCP client layer | Native MCP config — LuxAlgo, Edge Stats, prop-firm-sim plug straight in |
-| Context-retrieval layer | `CLAUDE.md` / `AGENTS.md` + skills |
-| Repair-loop orchestration | The agent runs pytest itself and reads the traceback |
-| Result-parsing glue | The agent reads `runs/*.json` directly |
+### 14.1 The MCP surface
 
-What stays as code: the store, the execution engine, the optimizer, the validation suite, the
-policy gates. **The agent orchestrates; it does not compute.**
+| Server | Transport | What the agent uses it for |
+|---|---|---|
+| **LuxAlgo Library** | `https://mcp.luxalgo.com/mcp`, keyless (or `npx @luxalgo/mcp`) | Understand a named concept; **read real Pine source** as grounding for both emitted scripts |
+| **Edge Stats** | stdio | Conditional frequencies over M1 bars, with N and a Wilson CI on every answer. "Does this setup actually happen, and how often" *before* writing a strategy for it |
+| **Prop Firm Sim** | stdio | Block-bootstrap Monte Carlo over the R-multiple series a backtest produced |
+| **QUANTOR engine** | stdio, **ours** | Run backtests, sweeps, validation; read results; apply a strategy to the chart (§14.2) |
 
-### Provider adapter
+The fourth is the one the plan was missing, and it is what makes the design uniform.
 
-Normalize behind one interface so the runtime is swappable:
+### 14.2 The engine is an MCP server
+
+Without it the agent has Bash and a Python package, so every backtest is an ad-hoc script it
+writes, runs, and parses the stdout of. That is brittle, unauditable, and gives the agent far
+more latitude than the task needs.
+
+With it, the agent calls typed tools and the engine owns the semantics:
 
 ```
-run_agent(prompt, *, cwd, mode, allowed_tools, mcp_config,
-          schema=None, session=None) -> stream of events
+data_list()                          -> loaded sources, resolution, GMT offset, quality
+strategy_save(spec, python, pine)    -> new version, lineage recorded (§16.3)
+strategy_get(id, version)            -> spec + both scripts
+backtest_run(id, version, params,
+             symbol, timeframe, span,
+             modeling_mode)          -> metrics, trade summary, equity curve ref
+optimize_run(id, param_spec, budget) -> results table, comparison count
+validate_run(id, params, modes)      -> per-mode verdicts (§12)
+chart_apply(id, version)             -> render signals + trades on the chart
+runs_query(filter)                   -> history from the library (§16)
 ```
+
+Three things this buys:
+
+- **The research-integrity boundary becomes enforceable** (§13). In strict mode the OOS tools
+  simply return a verdict; there is no filesystem path to read around, because the agent was
+  never handed one.
+- **Every action is logged as a tool call**, so "what did the agent actually do" is answerable
+  from the transcript without reconstructing intent from shell history.
+- **The agent cannot invent its own backtest.** It cannot quietly change the fill model, the
+  cost assumptions or the fold geometry, because those live behind the tool.
+
+### 14.3 Two scripts, one strategy
+
+Each strategy produces **two emitted scripts**:
+
+- **Pine Script** — grounded in real Library source pulled over MCP. Goes on the chart. This
+  is what the owner *looks at*.
+- **Python** — runs on the engine. This is what produces *numbers*.
+
+**They are siblings, generated from one spec — not translations of each other.** The strategy
+itself is a short structured spec (entry condition, exit, stop, target, session filter,
+parameters and bounds); both scripts are emitted from it, and **the spec is what versions**.
+Generating Python and then "translating" it to Pine reintroduces the translation-is-a-claim
+problem that got code export cut (§22); generating both from a spec does not, because neither
+is authoritative over the other.
+
+**Division of authority, and it is not negotiable:**
+
+> **Python is the system of record for every number. Pine is for looking at.**
+> A TradingView backtest figure is never quoted as a result of this system.
+
+**The honest risk: two scripts drift.** Independently emitted, they can disagree — a condition
+evaluated on a different bar, an indicator seeded differently. Three things keep that bounded,
+in increasing cost:
+
+1. **Pine-exact indicators (§8).** Our Python `ema`/`rma`/`rsi`/`atr` are pinned to a Pine
+   oracle by golden fixtures. This is why that work matters more under this design, not less.
+2. **Signal comparison.** Both emit entry/exit markers with timestamps. Compare the two lists.
+   Cheap, mechanical, and it catches real divergence without a parity subsystem.
+3. **The owner's eye.** Which is the next point, and is not a fallback.
+
+### 14.4 Verification by looking at the chart
+
+The owner applies the Pine script, looks at where it entered and exited, and judges. This is a
+**first-class step, not a consolation prize.** It catches things no metric does:
+
+- entries clustering at one time of day, or only in one regime
+- stops visibly inside normal noise
+- signals that fire somewhere the owner would never have taken the trade
+- a strategy that is technically profitable and obviously untradeable
+
+Metrics say whether it made money. The chart says whether it is the strategy you meant. Both
+matter, and the loop in §15.1 runs on both.
+
+### 14.5 What "no API keys" actually costs
+
+One real consequence, worth stating rather than discovering: **`--bare` mode requires
+`ANTHROPIC_API_KEY` and ignores subscription login.** So the reproducibility recipe the plan
+previously assumed is unavailable.
+
+What we can still do:
+
+- `--mcp-config <file>` — pin the exact server set per run, and check `system/init` for
+  `mcp_servers` / `mcp_server_errors` to fail fast when one does not load.
+- `--settings <file>` and `--append-system-prompt-file` — pin instructions explicitly.
+- `--allowedTools` scoped to the MCP tools plus `Read`/`Edit` — with the engine behind MCP,
+  the agent barely needs Bash, which tightens the surface considerably.
+- `--permission-mode` and `--max-turns` per §17.
+
+What we cannot do: guarantee a stray user-level hook, skill or personal MCP server on the
+owner's machine did not influence a run. So **record what was actually resolved** — session id,
+model, runtime version, and the `system/init` server list — into the library (§16) and treat it
+as provenance rather than a reproducibility guarantee. The engine stays deterministic (§7);
+the agent layer is logged, not reproduced.
+
+Spend is also not enforceable client-side without the API path. `--max-turns` and wall-clock
+remain; the `agent_spend` ceiling in §17 becomes advisory.
+
+### 14.6 Runtime specifics
 
 **Claude Code** (primary):
-- `claude -p "<prompt>"` non-interactive; exit 0 on success, non-zero on failure
-- `--output-format text | json | stream-json`; `--include-partial-messages` + `--verbose` for
-  token streaming into the sidebar
-- `--json-schema '<schema>'` → result in `structured_output`. Use this to enforce structured
-  output envelopes
-- `--allowedTools "Bash(pytest *),Read,Edit"` using permission-rule syntax (note the space
-  before `*` for prefix matching)
-- `--permission-mode auto|dontAsk|acceptEdits`; `--permission-prompts none` for unattended runs
-- `--mcp-config <file-or-json>`; check `system/init` for `mcp_servers` / `mcp_server_errors` to
-  fail fast when a server doesn't load
-- `--resume <session-id>` / `--continue`; transcripts are `.jsonl`
-- `--bare` skips auto-discovery of hooks, skills, commands, subagents, plugins, MCP and
-  `CLAUDE.md` — **use it for reproducible autonomous runs**, passing context explicitly via
-  `--append-system-prompt-file`, `--settings`, `--mcp-config`. Bare mode needs
-  `ANTHROPIC_API_KEY` and ignores subscription login
-- `--output-format json` returns `total_cost_usd` plus a per-model breakdown → **this is how the
-  spend ceiling in §17 is enforced.** Client-side estimate
-- `--max-turns` caps work per invocation
-- SIGTERM → exit 143, turn left unfinished; SIGINT ends the turn cleanly. Resume continues it
-- Piped stdin capped at 10 MB — pass large data as file paths, never piped
-- Python and TypeScript Agent SDK packages exist for full programmatic control. **Prefer the
-  Python SDK for the interactive sidebar** — the engine is Python, so there is no longer a
-  language boundary to cross — and the CLI for batch runs
+- `claude -p "<prompt>"` non-interactive; `--output-format stream-json` with
+  `--include-partial-messages` for streaming into the sidebar
+- `--resume <session-id>` / `--continue` — this is what makes §15.1's conversation continue
+  across restarts; transcripts are `.jsonl` and persist as run artifacts
+- `--json-schema` to enforce the strategy-spec envelope
+- SIGINT ends a turn cleanly (§15.4's cancel); SIGTERM leaves it unfinished
+- Piped stdin is capped at 10 MB — attachments go by path, never piped
+- The Python Agent SDK is preferred for the interactive sidebar; the engine is Python, so
+  there is no language boundary
 
 **Codex CLI** (secondary):
-- `codex exec "<prompt>"`; `--json` → JSONL event stream; `--output-schema <file.json>`
-- `--sandbox read-only | workspace-write | danger-full-access`; `codex exec resume --last`
-- `AGENTS.md` for project instructions; `.codex/config.toml` for MCP
-- `--ignore-user-config` / `--ignore-rules` for reproducible runs
-- **Known risk:** MCP tool calls in `codex exec` have been reported as auto-cancelled under
-  non-interactive approval, with workarounds that disable sandboxing. Verify before relying on it
+- `codex exec --json`, `--output-schema`, `codex exec resume --last`
+- `AGENTS.md` for instructions, `.codex/config.toml` for MCP
+- **Known risk:** MCP calls under `codex exec` have been reported auto-cancelled with
+  non-interactive approval, with workarounds that disable sandboxing. Verify before relying on
+  MCP under Codex — and since this design is MCP-first, that verification gates Codex support
+  entirely.
 
-**Raw API** (tertiary): fallback only. Do not design around it.
-
-### Project memory layout
+### 14.7 Project memory
 
 ```
 CLAUDE.md / AGENTS.md     harness contract, §4.5 rule, forbidden calls, repo map
 .claude/skills/
-  signal-blocks/          slot spec, typed contract, worked examples
-  indicators/             our indicator semantics + parity fixtures + gotchas
-  exemplars/              validated signal blocks, tagged by concept family
-.mcp.json                 luxalgo, edge-stats, prop-firm-sim
+  strategy-spec/          the spec schema + worked examples, both emissions
+  pine-emission/          Library-grounded Pine conventions, plot/marker contract
+  indicators/             our semantics, parity fixtures, accumulated gotchas
+  exemplars/              validated specs + script pairs, tagged by concept family
+.mcp.json                 luxalgo, edge-stats, prop-firm-sim, quantor-engine
 ```
 
-Skills work in `-p` mode — include `/skill-name` in the prompt. Start the exemplar corpus with
-~10 hand-written blocks; append every candidate that validates and produces sane trade counts.
-
-### Determinism under an agentic runtime
-
-- Persist the session `.jsonl` transcript as a run artifact
-- Record session ID, model, runtime version, and the resolved MCP server list from `system/init`
-- Use `--bare` / `--ignore-user-config` for autonomous runs so a stray hook or personal MCP
-  server on one machine can't change results
-- Seed everything numeric in the engine (§7)
-- Stamp every artifact with **policy, harness, store, instrument-spec and corpus versions**
-
-**Accept that the agent layer is not bit-reproducible. The engine must be.** That is the line:
-anything affecting a number is code and seeded; anything affecting a decision is the agent and
-logged.
-
----
+Start the exemplar corpus with ~10 hand-written spec/script triples; append every candidate
+that validates and produces sane trade counts. **The failure taxonomy (§9) now has two
+columns** — which emission failed, and how — and that distinction is what tells you whether a
+problem lives in the spec, the Pine conventions, or the Python contract.
 
 ## 15. The application — the conversation is the product
 
@@ -1181,10 +1257,30 @@ before the turn runs:
 
 | Mode | Does | Costs |
 |---|---|---|
-| **Brainstorm** | Discusses, pulls Library concepts, proposes. No code | Agent tokens only |
-| **Build** | Writes or edits a signal block, validates it, applies it to the chart | Tokens + a fast backtest |
+| **Brainstorm** | Discusses, pulls Library concepts over MCP, checks whether a setup even occurs via Edge Stats. No code | Agent tokens only |
+| **Build** | Writes the spec, emits **both scripts** (§14.3), runs a fast backtest, applies the Pine to the chart | Tokens + a fast backtest |
 | **Analyze** | Reads results and explains them — subject to §13 in strict mode | Tokens |
 | **Optimize** | Configures and launches a sweep or validation run | Tokens + real compute |
+
+### 15.1.1 The loop, concretely
+
+This is the cycle the whole system exists to serve:
+
+1. **Brainstorm.** "What about order blocks on the London open?" The agent pulls the concept
+   and its real Pine source from the Library over MCP, and — before any code — asks Edge Stats
+   whether the setup actually occurs often enough to matter. A concept that fires eleven times
+   a year is worth knowing about now, not after an afternoon of work.
+2. **Build.** The agent writes a strategy spec, emits the Pine and Python scripts from it, and
+   saves a version.
+3. **Test.** `backtest_run` on the engine. Metrics come back into the conversation.
+4. **Look.** The Pine goes on the chart. The owner sees where it actually entered and exited
+   (§14.4). This step catches what metrics cannot.
+5. **Refine.** "The stops are too tight in the Asian session." A new version, parent recorded.
+6. **Repeat**, then validate the survivors properly (§12) rather than the first thing that
+   looked good.
+
+Steps 3 and 4 answer different questions — *did it make money* and *is it the strategy I
+meant* — and a candidate needs both before it is worth optimizing.
 
 ### 15.2 What the agent is given each turn
 
@@ -1192,10 +1288,15 @@ An open question worth probing early (§19, Probe 7), because it decides both co
 The full transcript grows without bound and eventually dominates the token bill; too little and
 the agent re-proposes something rejected three days ago.
 
-The likely shape: a **compact strategy state** regenerated from the library each turn — current
-strategies, their parameters, their latest metrics, a one-line reason for each rejected
-variant — plus the last few turns verbatim, plus retrieval into the older transcript when a
-message refers back to something specific. Measure before committing.
+The likely shape: a **compact strategy state** regenerated from the library each turn —
+current strategies, their spec, parameters, latest metrics, and a one-line reason for each
+rejected variant — plus the last few turns verbatim, plus retrieval into the older transcript
+when a message refers back to something specific.
+
+**The two scripts should usually not be in context.** The spec is the strategy (§14.3); the
+emitted Pine and Python are derived artifacts the agent can fetch with `strategy_get` when it
+actually needs to edit one. Keeping both scripts in every turn's context is the fastest way to
+an unaffordable conversation. Measure before committing.
 
 ### 15.3 Layout
 
@@ -1490,18 +1591,23 @@ format and `tests/store/` covers it. What still needs the owner's actual files, 
 It remains available as a manual cross-check (§10.2). The cost of dropping it is stated there
 and should be read before trading a number this engine produced.
 
-**Probe 8 — NautilusTrader adapter (new, and the one that gates §3.1).** The library is
-verified to work (§3.1); what is unproven is *our* mapping onto it. In order:
+**Probe 8 — VectorBT cross-check (new).** Run the same simple strategy — percentage stops,
+wide relative to bar range, no intrabar ambiguity — through our engine and through VectorBT,
+and compare trade-by-trade (§10.4). Agreement is the independent reference; divergence means
+one of them has a bug and finding out which is the point. Cheap: one test, not a subsystem.
 
-1. Map one §5 instrument spec onto a Nautilus instrument — `price_increment`, `lot_size`,
-   `min/max_quantity`, `margin_init/maint`, fees — and confirm nothing in §5 has no home.
-   Anything that does not map is a gap to design around, not to ignore.
-2. Feed the owner's real ticks through `QuoteTickDataWrangler` and confirm the tick count,
-   timestamps and spreads survive the round trip.
-3. Run the **same** signal block through both engines on a strategy with wide stops (no
-   intrabar ambiguity) and compare trade-by-trade (§10.4). Divergence here is the finding.
-4. Time a full year on the owner's data. The ~4 min figure is from synthetic EUR/USD ticks;
-   real data is burstier.
+**Probe 9 — the MCP surface (new, and it gates §14).** The design is MCP-first, so prove the
+plumbing before building on it:
+
+1. `claude -p` with `--mcp-config` pointing at LuxAlgo, Edge Stats and prop-firm-sim. Confirm
+   all three load — check `system/init` for `mcp_server_errors`, do not assume.
+2. Stand up a **two-tool** QUANTOR engine server (`data_list`, `backtest_run`) and confirm the
+   agent calls it rather than reaching for Bash. If it works around the tools, the tool design
+   is wrong and better prompting will not fix it.
+3. Confirm `--allowedTools` scoped to MCP plus `Read`/`Edit` actually blocks what it should.
+4. **Repeat under `codex exec`.** MCP calls there have been reported auto-cancelled under
+   non-interactive approval; since this design is MCP-first, that result gates Codex support
+   entirely — it is not a minor compatibility note.
 
 **Probe 7 — conversational strategy loop (new).** The centrepiece feature (§15.1) is a
 conversation that produces and refines strategies over many turns, so probe the loop rather
@@ -1539,10 +1645,9 @@ What this measures:
    guesswork. Everything built after this point writes to it.
 5. **Indicator layer + golden fixtures** (§8). Cheap, and the foundation for every signal block.
 6. **Harness + signal-block contract + static validator** (§9).
-7. **Execution: the NautilusTrader adapter** (§3.1, §7) — Probe 8 first. The bar-mode sweep
-   engine already exists with its §10.1 invariants; this step is the `real_ticks` path, and it
-   is an integration rather than an engine. Once both run, §10.4's differential test becomes
-   the standing check that neither has drifted.
+7. **Tick-mode fills + the VectorBT cross-check** (§6, §10.4) — Probe 8. The bar engine and
+   its §10.1 invariants already exist; this adds the `real_ticks` path on the same engine and
+   the independent comparison that stands in for an external reference.
 8. **Early agent-hypothesis test.** Before the UI, before the optimizer: with the slice from
    step 0, have the agent generate ~20 signal blocks and read the failure modes. §9 says the
    failure taxonomy is month one's highest-value output — this is where that becomes true. Rev 3
