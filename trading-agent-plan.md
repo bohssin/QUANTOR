@@ -797,9 +797,16 @@ Library or not, reduces to "compute levels, arm conditions."
 
 - **Enforcement by namespace, not by prompt.** The block receives only `bars`, `p` and `h`.
   Order functions are not in scope, so calling one is a `NameError`, not a silent bug.
-- **Static validator** — an AST walk before execution, rejecting: imports, global/nonlocal
-  writes, attribute access outside the allowed namespaces, and any negative-index or forward
-  slice on `bars` (the lookahead check).
+- **Static validator — built** (`engine/signal/validator.py`, 20 tests). An AST walk before
+  execution rejecting imports, `open`/`eval`/`exec`/`compile`, dunder attribute access, and
+  forward or negative-start indexing on `bars` (the look-ahead check). It also checks the
+  function's shape: `signal(bars, p)` returning all four required keys.
+- **Honest limit, found while building it.** A restricted namespace is *not* a sandbox. Python
+  cannot be sandboxed by withholding names, and numba's dispatchers need `__import__` at call
+  time regardless — so the namespace has to expose it. Withholding names still catches
+  *mistakes* (a block reaching for an order function gets a `NameError`), and that is worth
+  having, but **the AST validator is the enforcement** and neither layer is a security
+  boundary. Never run a signal block the owner did not initiate.
 - **Signal blocks are unit-testable.** Call the function on a fixture and assert on its output.
   Rev 3 could only test through a CLI subprocess.
 
@@ -1090,8 +1097,12 @@ That is the design. The rest of this section is its consequences.
 | **Prop Firm Sim** | stdio | Block-bootstrap Monte Carlo over the R-multiple series a backtest produced |
 | **QUANTOR engine** | stdio, **ours** | Run backtests, sweeps, validation; read results; render on the chart (§14.2) |
 
-The Library is **reference, not strategy source** — the position §3 always took. The agent reads
-Pine to learn a definition and writes Python. No Pine is generated, stored, or run.
+The Library is used two ways, and both emit Python only — no Pine is generated, stored or run:
+
+- **As reference.** Read Pine to learn what a concept *is*, then implement it.
+- **As a strategy source** (§14.9). Port published strategies wholesale, backtest them on the
+  owner's data, and screen variants. Efficient, and statistically dangerous in a specific way
+  that §14.9 designs for.
 
 ### 14.2 The engine is an MCP server
 
@@ -1214,6 +1225,81 @@ auto-cancelled with non-interactive approval, and this design is MCP-first, so C
 gated on that being fixed or worked around. Not a priority. The provider adapter (§15) should
 keep the runtime swappable so adding it later is cheap, but nothing in the plan should wait on
 it.
+
+### 14.9 Screening the Library as a strategy source
+
+The Library holds hundreds of published strategies. Porting them to Python,
+backtesting them on the owner's data, and generating variants is a far more
+efficient way to find candidates than inventing from scratch — **and it is also
+the fastest way to fool yourself**, so the statistics need designing, not just
+the workflow.
+
+**Why it is a good idea.** A published Library strategy was selected on
+historical performance *somewhere else* — someone else's instruments, someone
+else's period. Running it on the owner's XAUUSD data is therefore a genuine
+out-of-sample test of that author's hypothesis. That is a much stronger starting
+point than an idea with no track record at all.
+
+**Why it needs care.** Generating variants and keeping the winners re-overfits
+on the owner's data, and at a scale hand-crafted strategies never reach.
+
+#### Screening mode
+
+This is a **batch** operation, not a conversation. It runs unattended and hands
+the conversation a ranked shortlist:
+
+```
+screen_library(concepts, data, symbols, budget_per_family)
+  for each concept:
+      read its Pine from the Library (MCP) -> implement in Python
+      backtest at the author's defaults        <- the honest first number
+      sweep a SMALL neighbourhood of variants
+      record everything, survivors and failures alike (§16.4)
+  -> ranked table + the null comparison below
+```
+
+The default backtest comes first and is reported separately. It is the only
+number in the whole exercise that has not been selected on, and it is the one
+worth trusting most.
+
+#### Four rules that make the screen honest
+
+1. **One Library concept = one family** (§13). Variants within a family share a
+   hypothesis, so the family budget and the closed-on-OOS-failure rule apply
+   exactly as designed. This is the use case §13 was built for; screening makes
+   it load-bearing rather than theoretical.
+
+2. **Comparison counts are cumulative and now enormous** (§11). Two hundred
+   concepts at fifty variants each is ten thousand trials, and the deflated
+   Sharpe ratio adjusts for precisely that number. A strategy that looks good
+   out of ten thousand is *far* less impressive than one that looks good out of
+   ten. If the count is not tracked across the whole screen, every DSR reported
+   afterwards is wrong in the flattering direction.
+
+3. **Compare the best result against a null, not against zero.** This check only
+   becomes available *because* of the volume, and it is the most valuable thing
+   screening gives you. Run the same screen against randomized-entry strategies
+   with matched trade counts and holding times (§12), and against shuffled
+   returns. **If the best real strategy is inside the distribution the null
+   produces, the screen found nothing** — however good that one equity curve
+   looks. Report the best result's percentile against the null, every time.
+
+4. **Cross-symbol survival is the strongest filter, and screening makes it
+   cheap.** A concept that survives *unchanged* on five instruments is worth
+   more than one tuned to fit one. Rank on cross-symbol consistency before
+   ranking on any single-symbol metric.
+
+#### What screening must not become
+
+Screening produces *candidates*, never conclusions. A survivor enters the normal
+loop (§15.1) — conversation, refinement, the chart, then full validation (§12)
+on a holdout that the screen never touched. The holdout must be reserved
+**before** the screen runs, or it has been used for selection like everything
+else.
+
+The failure side is as valuable as the survivors: a concept family that fails on
+the owner's data is recorded with its reason (§16.4), which is what stops the
+agent re-proposing it in three weeks.
 
 ### 14.8 Project memory
 
@@ -1528,13 +1614,13 @@ app/
   api/           FastAPI — run control, series feed, agent event stream
   ui/            Vela chart host, agent sidebar, results panel
   agent/         Claude Code session host, MCP config, attachments   [§14]
-  mcp/           the QUANTOR engine MCP server                        [§14.2]
+  quantor_mcp/   the QUANTOR engine MCP server — EXISTS              [§14.2]
 engine/
   store/         tick CSV ingest, Parquet store, bar construction, quality checks
                  ingest.py exists — reads the owner's format, verifies the time unit
   instruments/   spec registry (§5), FX conversion pairs
   indicators/    numpy/numba ta.* + parity fixtures          [§8]
-  signal/        harness, signal-block runner, static validator [PASS 1]
+  signal/        static validator — EXISTS; harness + helpers pending [PASS 1]
   backtest/      bar-mode fill engine + metrics — EXISTS       [PASS 2 sweep]
   execution/     NautilusTrader adapter: intents -> orders,    [PASS 2 validate]
                  instrument spec -> Nautilus instrument, results back
@@ -1601,19 +1687,35 @@ wide relative to bar range, no intrabar ambiguity — through our engine and thr
 and compare trade-by-trade (§10.4). Agreement is the independent reference; divergence means
 one of them has a bug and finding out which is the point. Cheap: one test, not a subsystem.
 
-**Probe 9 — the MCP surface (new, and it gates §14).** The design is MCP-first, so prove the
-plumbing before building on it:
+**Probe 9 — the MCP surface. Partly done.**
 
-1. `claude -p` with `--mcp-config` pointing at LuxAlgo, Edge Stats and prop-firm-sim. Confirm
-   all three load — check `system/init` for `mcp_server_errors`, do not assume.
-2. Stand up a **two-tool** QUANTOR engine server (`data_list`, `backtest_run`) and confirm the
-   agent calls it rather than reaching for Bash. If it works around the tools, the tool design
-   is wrong and better prompting will not fix it.
-3. Confirm `--allowedTools` scoped to MCP plus `Read`/`Edit` actually blocks what it should.
-4. Confirm `--resume` restores a conversation with its MCP servers intact — §15.1's whole
-   premise is that the conversation continues across restarts.
+**Built and verified** (`quantor_mcp/server.py`): the engine runs as an MCP server on the
+current SDK (`mcp` 2.x, where `FastMCP` became `MCPServer`), exposing `data_list`, `data_load`,
+`strategy_save`, `strategy_list`, `strategy_get`, `backtest_run`, `optimize_run`,
+`validate_run` and `chart_apply`. Every tool was driven end to end against a 40,000-bar source:
+data loaded with its quality report, a strategy saved and versioned, a backtest returning
+metrics with the ledger reconciling, a grid sweep reporting its comparison count, walk-forward
+returning per-fold results and efficiency, and `chart_apply` returning that run's own markers.
 
-Codex is explicitly out of scope for this probe (§14.7).
+**What it found.** The first design executed signal blocks in a restricted namespace with a
+trimmed `__builtins__`, and it failed immediately: `KeyError: '__import__'`, because numba's
+dispatchers import at call time. That is not a detail to patch around — it is the evidence that
+namespace restriction is not enforcement. The AST validator (§9) is, and it now runs at
+`strategy_save`, before a block is ever stored.
+
+**Still to do, and it needs a Claude Code session rather than a test harness:**
+
+1. `--mcp-config` with LuxAlgo, Edge Stats and prop-firm-sim — confirm all three load, checking
+   `system/init` for `mcp_server_errors` rather than assuming. **LuxAlgo's endpoint is
+   unreachable from this environment** (egress-blocked), so its tool surface is unverified —
+   run this locally.
+2. **Does the agent actually use the tools, or work around them?** The question Probe 9 exists
+   for. If it reaches for Bash, the tool design is wrong and better prompting will not fix it.
+3. Confirm `--allowedTools` scoped to MCP plus `Read`/`Edit` blocks what it should.
+4. Confirm `--resume` restores a conversation with its servers intact — §15.1's premise is that
+   the conversation survives restarts.
+
+Codex is out of scope (§14.7).
 
 **Probe 7 — conversational strategy loop.** The centrepiece feature (§15.1) is a conversation
 that produces and refines strategies over many turns, so probe the loop rather than a single
@@ -1651,7 +1753,9 @@ What this measures:
    run. It is a few tables, and retrofitting lineage onto runs that were never recorded is
    guesswork. Everything built after this point writes to it.
 5. **Indicator layer + golden fixtures** (§8). Cheap, and the foundation for every signal block.
-6. **Harness + signal-block contract + static validator** (§9).
+6. **Harness + signal-block contract.** The static validator exists
+   (`engine/signal/validator.py`) and the engine MCP server exposes it at `strategy_save`
+   (§14.2); what remains is the bar-loading and session helpers the blocks call.
 7. **Tick-mode fills + the VectorBT cross-check** (§6, §10.4) — Probe 8. The bar engine and
    its §10.1 invariants already exist; this adds the `real_ticks` path on the same engine and
    the independent comparison that stands in for an external reference.

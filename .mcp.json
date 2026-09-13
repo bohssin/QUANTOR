@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "quantor-engine": {
+      "command": "python3",
+      "args": ["-m", "quantor_mcp.server"]
+    },
+    "luxalgo": {
+      "command": "npx",
+      "args": ["-y", "@luxalgo/mcp"]
+    }
+  }
+}
