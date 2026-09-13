@@ -7,7 +7,15 @@ import datetime as dt
 import numpy as np
 import pytest
 
-from engine.store import SourceSpec, infer_utc_offset_hours, read_tick_csv
+from engine.store import (
+    SourceSpec,
+    assert_serves_timeframe,
+    detect_decimals,
+    detect_resolution_ms,
+    infer_utc_offset_hours,
+    read_csv,
+    read_tick_csv,
+)
 
 # Exactly the owner's sample, including the ragged decimals (1905.12).
 SAMPLE = """timestamp,bidPrice,askPrice
@@ -30,8 +38,8 @@ def test_reads_owner_format(sample_csv):
     assert chunk.ms.dtype == np.int64
     # Ragged decimals must survive: 1905.12 is 1905120 at tick_size 0.001.
     assert chunk.ask[2] == 1905120
-    np.testing.assert_allclose(chunk.bid_float(), [1904.998, 1905.248, 1904.664])
-    np.testing.assert_allclose(chunk.ask_float(), [1905.366, 1905.492, 1905.12])
+    np.testing.assert_allclose(chunk.to_float("bid"), [1904.998, 1905.248, 1904.664])
+    np.testing.assert_allclose(chunk.to_float("ask"), [1905.366, 1905.492, 1905.12])
 
 
 def test_timestamps_are_milliseconds_not_seconds(sample_csv):
@@ -60,8 +68,8 @@ def test_utc_offset_is_applied(sample_csv):
 
 def test_missing_column_is_refused_not_guessed(tmp_path):
     p = tmp_path / "wrong.csv"
-    p.write_text("time,bid,ask\n2021-01-04 01:00:00.413,1904.998,1905.366\n")
-    with pytest.raises(ValueError, match="missing column"):
+    p.write_text("time,foo,baz\n2021-01-04 01:00:00.413,1904.998,1905.366\n")
+    with pytest.raises(ValueError, match="needs bid and ask"):
         read_tick_csv(p)
 
 
@@ -75,8 +83,8 @@ def test_quality_report_flags_same_millisecond_ticks(tmp_path):
         "2021-01-04 01:00:00.200,1905.010,1905.380\n"
     )
     q = read_tick_csv(p).quality
-    assert q.same_ms_pairs == 2
-    assert q.max_same_ms_run == 2
+    assert q.duplicate_timestamps == 2
+    assert q.max_duplicate_run == 2
     assert q.rows == 4
 
 

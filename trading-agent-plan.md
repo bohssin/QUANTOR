@@ -4,14 +4,24 @@
 
 **Shape:** a local application. Chart on the left, AI agent sidebar on the right. The agent
 writes strategy logic in Python, applies it to the chart, backtests it against the owner's own
-tick data, optimizes and validates it, across any instrument.
+data, optimizes and validates it, across any instrument — and can write the strategy out as
+MQL5 or Pine Script on request (§22).
+
+**A platform, not a script runner.** Strategies, versions, runs, optimization tables,
+verdicts, exports and agent conversations are all catalogued and browsable later (§16).
+Nothing generated is thrown away.
+
+**Data in:** the owner's own CSVs — **ticks or bars**, any instrument, any precision, each
+with its own GMT offset. The file's resolution decides what it can be used for (§4.6), and
+its precision is read out of the file rather than declared (§4.2).
 
 **Reference platform: MetaTrader 5.** One reference, everywhere. The data model is MT5's
 (tick history → bars at a chosen timeframe), the fidelity dial is MT5's (modeling modes), the
 UI is MT5's (Strategy Tester layout), and the live execution path is the owner's existing MQL5
-EA — which strategies can be **exported to** on a button (§21).
+EA — which strategies can be **exported to** on a button (§22).
 
-TradingView is an *export target only* (§21): a way to look at a strategy on a TV chart. No
+TradingView is an *export target only* (§22): the agent writes Pine Script on request so a
+strategy can be viewed on a TV chart. No
 part of the engine targets it.
 
 **Engine:** Python — numpy + numba. No Pine Script transpiler, no 1-second intermediate bars.
@@ -37,7 +47,7 @@ What is expected of you:
 - **Extend it.** Whole areas are sketched rather than designed: the UI, the optimizer
   internals, live-forward testing, multi-strategy portfolios, regime detection, the exemplar
   corpus. Add what is missing.
-- **Question the sequencing.** §19's build order is a guess at dependency structure. If a
+- **Question the sequencing.** §20's build order is a guess at dependency structure. If a
   different order gets to a working loop faster, propose it.
 
 What is *not* up for renegotiation, because these are correctness properties rather than
@@ -51,9 +61,13 @@ preferences:
 - **§8's golden-fixture rule.** No indicator ships without a frozen numerical fixture.
 - **§10.1's engine invariants.** The fill engine is verified by property tests, not by
   inspection. These carry more weight now that MT5 reconciliation is not a build gate (§10.2).
-- **§21.3's export parity rule.** An unverified export is never presented as verified.
+- **§22.2's export parity rule.** The agent writes the exports, so they are *claims* until
+  measured. An unverified export is never presented as verified, and never traded.
+- **§16's keep-everything rule.** Strategies, versions, runs and rejected candidates are
+  catalogued, not discarded. §9's failure taxonomy and §13's holdout tracking are queries
+  over that history; delete it and neither can exist.
 - **§13's holdout-touched-once and comparison-count logging.**
-- **§16's policy file: no threshold anywhere else in the codebase as a literal.**
+- **§17's policy file: no threshold anywhere else in the codebase as a literal.**
 
 Everything else is a proposal. Argue with it.
 
@@ -67,9 +81,9 @@ Everything else is a proposal. Argue with it.
   until the data is trustworthy.
 - **§5–13** are design decisions.
 - **§14–15** are the agent runtime and the application.
-- **§16** is the policy file.
-- **§17–20** are repo layout, probes, build order and open questions.
-- **§21** is export to MQL5 / Pine, and where that leaves the execution boundary.
+- **§17** is the policy file.
+- **§18–20** are repo layout, probes, build order and open questions.
+- **§22** is export to MQL5 / Pine Script, and where that leaves the execution boundary.
 
 Measured numbers appear inline as `[measured]`. They were produced on a 4-core / 16 GB Linux
 box against a synthetic 10M-tick dataset and are recorded so you do not re-litigate settled
@@ -142,8 +156,20 @@ order is known.
 ### Everything rev 3 got right, kept
 
 The harness / signal-block split (§9), the instrument registry (§5), duration-vs-bar-count
-discipline (§4.5), research integrity mode (§13), the policy file (§16), output-is-parameters
-(§21), and §0's "argue with this" posture. Those were the good ideas and they survive intact.
+discipline (§4.5), research integrity mode (§13), the policy file (§17), output-is-parameters
+(§22), and §0's "argue with this" posture. Those were the good ideas and they survive intact.
+
+### Two numbers this plan got wrong, and fixed
+
+Recorded because the *method* of the error matters more than the error.
+
+- **Tick volume, out by 11×.** A per-tick rate extrapolated from three consecutive sample rows
+  gave 414M ticks/year and a declaration that chunking was mandatory. The owner's actual file
+  size — ~1.5 GB/year — says ~38M ticks, which fits in memory. Tick arrival is violently
+  non-uniform; measure spans, never samples (§4.1).
+- **Instrument precision, wrongly declared.** §5 originally hardcoded XAUUSD at 2 decimals,
+  then 3. Both were guesses at something the CSV already states. Precision is now read from the
+  file (§4.2) and the spec owns only what the file cannot tell you.
 
 ### Consequences worth naming
 
@@ -168,7 +194,7 @@ discipline (§4.5), research integrity mode (§13), the policy file (§16), outp
 | Arrays / math | **numpy** | all series computation |
 | Hot loops | **numba** (`njit`) | bar construction, fill engine |
 | Columnar store | **pyarrow** + Parquet | tick and bar persistence |
-| Tabular / joins | **pandas** or **polars** | ingest, reporting (pick one, §20) |
+| Tabular / joins | **pandas** or **polars** | ingest, reporting (pick one, §21) |
 | Optimization | **Optuna** | TPE, NSGA-II, grid, random |
 | Property tests | **hypothesis** | engine invariants (§10.4) |
 | API | **FastAPI** + uvicorn | serves the UI and run control |
@@ -246,58 +272,74 @@ density that is the difference between ~18 s and ~12 minutes to parse one year.
    infer, because an explicit format forces the slow `strptime` path and bypasses the ISO8601
    fast path. The obvious "optimization" is a pessimization.
 
-**Density, from the owner's sample: ~20 ticks/second** — roughly 7× the rate first assumed.
-That changes capacity planning substantially:
+**Volume, from the owner's actual files: ~1.5 GB of tick CSV per year.** At 42 bytes per row
+that is **~38M ticks/year**, averaging ~1.9 ticks/second.
 
-| Storage | bytes/tick | 1 year @ ~20 ticks/s (≈414M ticks) |
+An earlier revision of this section said ~414M ticks/year and declared chunking mandatory.
+That was wrong by 11×: it extrapolated a per-tick rate from three consecutive sample rows that
+happened to fall inside an active burst. The file size is the honest measure, and it says
+something much more comfortable:
+
+| Storage | bytes/tick | 1 year (≈38M ticks) |
 |---|---|---|
-| int64 ms + 2× float64 | 24 | **9.9 GB** |
-| int64 ms + 2× scaled int32 | 16 | **6.6 GB** |
+| int64 ms + 2× float64 | 24 | 0.92 GB |
+| int64 ms + 2× scaled int32 | 16 | **0.61 GB** |
 
-So **chunking is mandatory, not an optimization.** Partition by `symbol/year/month` (~34M
-ticks ≈ 550 MB per month) and stream the fill engine across partitions, carrying position
-state over the boundaries. Never assume a year fits in memory.
+**A full year fits in memory.** Partition by `symbol/year/month` anyway — it keeps loads
+scoped to the run's span and makes re-ingest incremental — but streaming across partitions
+with carried position state is an optimization, not a requirement. Do not design for it up
+front.
+
+The lesson generalizes: extrapolating rates from a handful of rows is unreliable in market
+data, because tick arrival is violently non-uniform. Measure spans, not samples.
 
 **Prices are stored as integers scaled by tick size** — 1905.366 at `tick_size=0.001` becomes
-`1905366`. Halves memory, round-trips exactly `[measured]`, and makes stop/target comparisons
-*exact integer* comparisons. That last point is the real reason: price-level comparison is the
-one place in the engine where a float epsilon silently changes which trade happened. int32
-covers prices to 2,147,483 at 3 decimals; fall back to int64 beyond that.
+`1905366`. Cuts memory by a third, round-trips exactly `[measured]`, and makes stop/target
+comparisons *exact integer* comparisons. That last point is the real reason: price-level
+comparison is the one place in the engine where a float epsilon silently changes which trade
+happened. int32 covers prices to 2,147,483 at 3 decimals; fall back to int64 beyond that.
 
 ### 4.2 Ingest
 
 The owner's CSVs are the universal data path, and tick CSV formats vary by vendor. Ingest is
 **tolerant and explicit**: a per-source YAML mapping, never format sniffing.
 
-The owner's format, which the ingest targets directly:
+**Ticks or bars — the store takes either.** Not everyone has tick history, and for many
+strategies M1 bars are plenty. Both shapes normalize to the same `MarketData`:
 
 ```
-timestamp,bidPrice,askPrice
+timestamp,bidPrice,askPrice                  <- ticks
 2021-01-04 01:00:00.413,1904.998,1905.366
-2021-01-04 01:00:00.464,1905.248,1905.492
-2021-01-04 01:00:00.514,1904.664,1905.12
+
+timestamp,open,high,low,close,volume         <- bars (M1, M5, H1, ...)
+2021-01-04 01:00:00,1904.998,1905.4,1904.2,1905.1,318
 ```
 
-Note `1905.12` — decimals are ragged, so parse as float and scale; never assume fixed width.
-There is **no volume column**, so bar volume is tick count (which is what MT5 reports for tick
-data anyway, §4.4).
+The source's own resolution then decides which modeling modes it can support (§6) and which
+strategy timeframes it can serve (§4.6).
 
-```yaml
-source: xauusd_ticks
-file_glob: "raw/XAUUSD/*.csv"
-columns:
-  timestamp: timestamp        # 'YYYY-MM-DD HH:MM:SS.fff'
-  bid:       bidPrice
-  ask:       askPrice
-  volume:    null             # absent — volume is tick count
-utc_offset_hours: 0.0         # the clock the strings are IN — see §4.3, verify it
-tick_size: 0.001              # XAUUSD at 3 decimals on this feed
-```
+**Precision is read out of the file, never declared.** Digits differ per asset and per feed —
+XAUUSD at 3 decimals here, EURUSD at 5, an index at 1 — and the CSV already states its own
+precision by how it is written. A column holding both `1904.998` and `1905.12` is a 3-decimal
+column whose trailing zero was trimmed, so `tick_size = 0.001`. Requiring the owner to declare
+this per instrument was one more thing to get wrong for no benefit.
+
+**Detection reports, it does not guess silently.** Column names are matched against a small
+alias set (`bidPrice`/`bid`/`b`, `close`/`c`, `Date_Time`/`timestamp`, …), the source kind
+follows from which family is present, and whatever was concluded is exposed on
+`MarketData.detected` and printed at import. A file carrying *both* OHLC and bid/ask columns
+raises rather than picking a side; so does one where no price family is recognizable. Any
+field can be pinned explicitly on `SourceSpec`, which always wins.
+
+**GMT offset is set per import.** Vendors differ and files rarely say, so every import carries
+its own `utc_offset_hours` — cross-checked against §4.3's weekend-gap inference, never
+inferred silently. Two files of the same symbol on different clocks normalize correctly
+because each declares its own.
 
 Also support at minimum: epoch ms/s and MT5's exported tick format
-(`<DATE> <TIME> <BID> <ASK> <LAST> <VOLUME> <FLAGS>`). Columns are **named explicitly and
-never sniffed** — a store that silently reinterprets a column is worse than one that refuses
-to load. Implemented in `engine/store/ingest.py`.
+(`<DATE> <TIME> <BID> <ASK> <LAST> <VOLUME> <FLAGS>`). Implemented in
+`engine/store/ingest.py`; `tests/store/` covers ticks, bars, alias matching, precision
+detection and the refusals.
 
 Records the file's SHA-256 and row count in the store manifest. A re-ingest that produces a
 different hash is a new store version, stamped into every run that used it.
@@ -374,6 +416,28 @@ preserves the correctness property exactly where it bites:
   timeframe, so it is approximate on gappy data. Accept this explicitly; do not pretend
   otherwise.
 
+### 4.6 Source resolution vs strategy timeframe
+
+**A source can be aggregated up to a coarser timeframe. It can never be split down to a finer
+one.** Detail that was never recorded cannot be recovered, and inventing it is how a backtest
+starts reporting fills that could not have happened.
+
+| Source | Serves | Best available modeling mode (§6) |
+|---|---|---|
+| Ticks | every timeframe | `real_ticks` |
+| M1 bars | M1 and coarser | `m1_ohlc` |
+| M5 bars | M5 and coarser | `open_prices` / bar-close |
+| H1 bars | H1 and coarser | `open_prices` / bar-close |
+
+Equal resolution is allowed — an M5 file drives an M5 strategy — but only at bar-close
+fidelity: intrabar order is unknown, so stop-versus-target within the signal bar cannot be
+resolved. That is a real limitation of the data, and the report says so rather than silently
+picking one.
+
+The check runs at load (`assert_serves_timeframe`) and refuses with a message naming both
+resolutions and the two ways out: supply finer data, or run the strategy at the source's
+resolution or coarser. Never a warning — a run on impossible data is not a run.
+
 ---
 
 ## 5. Instrument specification registry
@@ -389,9 +453,11 @@ base_currency: XAU
 quote_currency: USD
 contract_size: 100          # units per 1.00 lot
 lot: {min: 0.01, step: 0.01, max: 100}
-tick_size: 0.001            # owner's XAUUSD feed quotes 3 decimals, not 2
+# NOTE: tick_size / digits are NOT declared here — they are read from the
+# imported CSV (§4.2), because precision varies by asset and by feed. What
+# the spec owns is what the file cannot tell you: contract size, costs,
+# margin, sessions.
 tick_value: 0.10            # quote currency, per 1.00 lot, per tick_size
-digits: 3
 pip_definition: 0.1         # explicit — "pip" is ambiguous on metals
 
 # MT5 order-validity constraints (rev 3 missed these)
@@ -443,6 +509,12 @@ assumption. Adopt it directly, with MT5's vocabulary, because the owner already 
 | **`real_ticks`** | bar close on signal TF | **real tick stream** | ~0.2 s `[measured]` | **System of record.** Every reported result |
 | **`m1_ohlc`** | bar close on signal TF | M1 OHLC, assumed intrabar path | ~0.05 s | Spans with missing tick data |
 | **`open_prices`** | bar open on signal TF | bar open | ~7 ms `[measured]` | **Optimizer sweeps** |
+
+**Availability follows the source (§4.6), not preference.** `real_ticks` requires a tick
+source; `m1_ohlc` requires M1 or finer; `open_prices` works on anything at or below the
+strategy timeframe. The UI offers only the modes the loaded data can actually support, and
+says why the others are unavailable — rather than accepting a selection it will quietly
+approximate.
 
 `real_ticks` is MT5's "Every tick based on real ticks" and is the only mode whose numbers are
 reportable. `open_prices` exists because it is ~30× cheaper, which is what makes large sweeps
@@ -622,7 +694,7 @@ real Python traceback and retries, up to the owner's limit → on exhaustion, ma
 the failure pattern. Tracebacks are considerably more useful than transpiler errors.
 
 **The failure taxonomy is the highest-value output of month one** — it tells you what to put in
-the skills. See §19, which is sequenced so this is actually possible in month one.
+the skills. See §20, which is sequenced so this is actually possible in month one.
 
 ---
 
@@ -655,10 +727,10 @@ external ground truth. §10.1's invariants prove the engine is *internally consi
 cannot prove it fills the way a broker does. If a systematic bias exists — a spread applied on
 the wrong side, a stop evaluated one tick late — every invariant still passes.
 
-What replaces it is **§21's MQL5 export**, which makes the check available whenever it is
+What replaces it is **§22's MQL5 export**, which makes the check available whenever it is
 wanted instead of required before anything is built. Export the strategy, run the generated EA
 in MT5's Strategy Tester on the same span, and compare. The export's own parity harness
-(§21.3) already performs exactly this comparison, so the machinery exists either way — the
+(§22.4) already performs exactly this comparison, so the machinery exists either way — the
 only question is when it is run.
 
 Recommendation: do it once, on one strategy, before trusting a number you intend to trade.
@@ -714,7 +786,7 @@ Calmar/CAR-MDD · recovery factor · SQN · custom expression.
 
 **Default is not net profit.** Optimizing raw return reliably surfaces the highest-variance
 survivor — it wins the backtest and blows up live. A drawdown-aware objective is the sane
-default; the owner sets it in §16.
+default; the owner sets it in §17.
 
 ### Cost model
 
@@ -862,7 +934,7 @@ run_agent(prompt, *, cwd, mode, allowed_tools, mcp_config,
   `--append-system-prompt-file`, `--settings`, `--mcp-config`. Bare mode needs
   `ANTHROPIC_API_KEY` and ignores subscription login
 - `--output-format json` returns `total_cost_usd` plus a per-model breakdown → **this is how the
-  spend ceiling in §16 is enforced.** Client-side estimate
+  spend ceiling in §17 is enforced.** Client-side estimate
 - `--max-turns` caps work per invocation
 - SIGTERM → exit 143, turn left unfinished; SIGINT ends the turn cleanly. Resume continues it
 - Piped stdin capped at 10 MB — pass large data as file paths, never piped
@@ -925,9 +997,9 @@ the 10 MB stdin cap.
 results table (sortable) · Optimization surface (2D/3D) · Validation verdicts. Modeling mode and
 validation mode shown on every tab.
 
-**Export buttons.** `Export → MQL5` and `Export → Pine`, in the strategy view and the results
+**Export buttons.** `Export → MQL5` and `Export → Pine Script`, in the strategy view and the results
 panel, each showing a parity badge — verified / unverified / not exportable, with the reason.
-See §21: the two targets serve different purposes, and an unverified export is never presented
+See §22: the two targets serve different purposes, and an unverified export is never presented
 as verified.
 
 **Agent modes**, explicit in the UI so the owner always knows whether a reply spends compute:
@@ -936,18 +1008,118 @@ block, validates, applies to the chart at current symbol/TF) · **Analyze** (rea
 subject to §13) · **Optimize** (configures and launches a run).
 
 **Run lifecycle (MT5-like):** Configure → Start → progress with cancel → results. Checkpointed
-and resumable. Every run is a SQLite row with policy version, artifacts, seeds and the agent
-session transcript. **Cancel maps to SIGINT** (ends the turn cleanly) rather than SIGTERM.
+and resumable. Every run is a row in the library (§16) carrying its policy, store, spec and
+strategy versions, its seed, its artifacts and its agent transcript — so any past run reopens
+exactly as it was. **Cancel maps to SIGINT** (ends the turn cleanly) rather than SIGTERM.
+
+**Library tabs** — Strategies, History, Compare, Conversations, Data (§16.5). These are not a
+side feature; they are how the owner navigates their own work.
 
 **Shell:** local web — FastAPI + uvicorn serving a browser frontend. Resolves rev 3's
 Electron/Tauri question, and with no AGPL in the stack there is no network-service concern.
 
-**Ceilings, any one of which stops a run** (§16): wall clock · agent spend (from
+**Ceilings, any one of which stops a run** (§17): wall clock · agent spend (from
 `total_cost_usd`) · evaluations.
 
 ---
 
-## 16. Policy file — the owner sets every value
+## 16. The library — nothing generated is thrown away
+
+**This is a platform, not a script runner.** Everything the system produces — strategies,
+versions, runs, optimization tables, validation verdicts, exports, agent conversations,
+imported data sources — is catalogued, linked to what produced it, and browsable later.
+Work that vanishes when a window closes is work paid for twice.
+
+This section exists because the alternative is the default. Research tools drift into writing
+results to a directory, printing a summary, and moving on; three weeks later nobody can say
+which parameters produced the good equity curve, or whether a candidate was already tried and
+rejected.
+
+### 16.1 What is persisted
+
+| Entity | Holds | Why it must survive |
+|---|---|---|
+| **Data source** | file hash, symbol, kind, resolution, GMT offset, row count, span | A run is meaningless without knowing which bytes it read |
+| **Strategy** | name, tags, notes, archived flag | The unit the owner thinks in |
+| **Strategy version** | signal-block source, params spec, parent version, origin | Every edit is a new version. Nothing is overwritten |
+| **Run** | kind, symbol, timeframe, modeling mode, span, seed, all four stamped versions, status, artifact path | The reproducibility record |
+| **Optimization** | mode, objective, budget, **comparison count**, full result table | §12's deflated Sharpe needs the trial count; §18's ceilings need the spend |
+| **Validation** | per-mode verdicts, overfit detectors, holdout-touched flag | §13 depends on the holdout being provably touched once |
+| **Export** | target, generated source, parity status and report | §22 — an export's verdict is part of its identity |
+| **Agent session** | transcript, model, runtime version, resolved MCP servers, cost | §15's determinism record, and the raw material for the failure taxonomy |
+
+### 16.2 Catalogue and artifacts
+
+**SQLite for the catalogue, content-addressed files for the artifacts.** The database holds
+rows small enough to query — identifiers, parameters, metrics, statuses, lineage. Equity
+curves, trade lists, optimization surfaces and transcripts live on disk under their content
+hash, so identical results deduplicate and nothing is ever overwritten in place.
+
+```
+library.db                     the catalogue
+artifacts/<sha256[:2]>/<sha256>    equity curves, trade lists, surfaces, transcripts
+exports/<strategy>/<version>/      generated .mq5 / .pinescript
+```
+
+SQLite because it is a single file the owner can copy, back up, and open with any tool — and
+because this is a local application with one writer. Nothing here needs a server.
+
+### 16.3 Lineage is the point
+
+Every run records the **exact** inputs that produced it: strategy version, policy version,
+store version (file hashes), instrument spec version, modeling mode, and seed. Given a run id,
+the system can state precisely what produced its numbers, and re-running it must reproduce
+them byte for byte (§7).
+
+Strategy versions form a tree, not a list. A version records its parent and its origin — which
+agent session, which prompt, or hand-written. So "where did this come from" is always
+answerable, and a promising candidate three weeks old can be branched from rather than
+reconstructed from memory.
+
+### 16.4 Rejected work stays in the library
+
+Rev 3 had a `graveyard/` directory. That was the right instinct with the wrong storage: a
+rejected candidate is not rubbish, it is **evidence**. Archived strategies stay in the
+catalogue, fully queryable, with the reason they were archived.
+
+Two things in this plan depend on it directly:
+
+- **§9's failure taxonomy** — "the highest-value output of month one" — is a query over
+  rejected generations. If they are deleted, or dumped somewhere unqueryable, it cannot be
+  built at all.
+- **§15's exemplar corpus** grows by promoting validated blocks. Knowing what has already
+  failed, and how, is what keeps it from re-proposing the same dead ends.
+
+Archiving hides something from the default view. Nothing deletes it. Deletion is an explicit,
+confirmed, single-item action.
+
+### 16.5 In the UI
+
+- **Strategies** — list and version tree, filter by tag, symbol, status; diff two versions.
+- **History** — every run, newest first, filterable by strategy, symbol, timeframe, modeling
+  mode, verdict. Open any past run and its chart, trade list and report render exactly as they
+  did on the day it ran, because the artifacts are still there.
+- **Compare** — two or more runs side by side. The system knows their inputs differ and says
+  *how*, rather than leaving the owner to remember.
+- **Conversations** — past agent sessions, resumable via `--resume` (§15), each linked to the
+  strategy versions it produced.
+- **Data** — imported sources with their quality reports (§4.4), GMT offsets, and which runs
+  used them.
+
+### 16.6 Cost of getting this wrong
+
+Persisting too little is silent and expensive: it surfaces weeks later as work redone, or as a
+number nobody can trace. Persisting too much is cheap and obvious — artifacts are small
+relative to the tick store, and a year of heavy use will not approach the size of one year of
+ticks (§4.1).
+
+So the default is **keep it**. If storage ever becomes a real constraint, prune artifacts for
+archived strategies while keeping their catalogue rows — the metrics and lineage are what the
+taxonomy needs, not the equity curves.
+
+---
+
+## 17. Policy file — the owner sets every value
 
 **No threshold appears anywhere else as a literal.** The engine computes metrics and applies
 whatever comparisons the policy names. Diff two policy versions to see what changed between
@@ -959,11 +1131,18 @@ version: <str>
 run:
   symbols: [...]
   broker: <str>                       # selects the instrument spec (§5)
-  signal_timeframe: <M1|M5|M15|M30|H1|H4|D1|W1|MN>
-  modeling_mode: <real_ticks|m1_ohlc|open_prices>   # §6
+  signal_timeframe: <M1|M5|M15|M30|H1|H4|D1|W1>
+  modeling_mode: <real_ticks|m1_ohlc|open_prices>   # §6; must be supported by the source
   span: {start: <date>, end: <date>}
   account_currency: <str>
   initial_capital: <num>
+
+data:                                 # per imported file — §4.2
+  sources:
+    - id: <str>                       # library reference (§16), not a path
+      utc_offset_hours: <num>         # the clock the file is written in — §4.3
+      tick_size: <num|null>           # null = read the decimals out of the file
+      timeframe: <str|null>           # null = infer from spacing; ignored for ticks
 
 execution:
   slippage_model: <fixed|spread_prop|gap_based>
@@ -1009,6 +1188,16 @@ ceilings:
 generation:
   repair_retries: <int>
 
+export:                               # §22
+  parity_tolerance: <num>             # abs difference allowed per signal series
+  parity_span: <duration>             # how much history the check runs over
+  repair_retries: <int>               # generate -> check -> repair, per target
+  block_unverified: <bool>            # refuse to write an export that failed parity
+
+library:                              # §16
+  artifact_root: <path>
+  keep_rejected: true                 # §9's failure taxonomy is a query over these
+
 reproducibility:
   seed: <int>
   numba_fastmath: false               # do not change; see §7
@@ -1020,7 +1209,7 @@ Note what is *gone* from rev 3's policy: `execution_resolution` (no 1s layer),
 
 ---
 
-## 17. Repo layout
+## 18. Repo layout
 
 ```
 app/
@@ -1036,12 +1225,13 @@ engine/
   execution/     fill engine, sizing, margin, swap, OCA       [PASS 2]
   optimize/      search modes, objectives, param specs
   validate/      fold geometry, MC modes, PBO/DSR, verdicts
-  export/        mql5/ + pine/ emitters, harness templates, parity harness [§21]
+  export/        mql5/ + pinescript/ harness templates, parity harness    [§22]
+  library/       SQLite catalogue + content-addressed artifact store      [§16]
 tests/
   golden/        indicator fixtures (PineTS oracle)
   store/         ingest tests against the owner's real tick format
   invariants/    hypothesis property tests for the fill engine [§10.1]
-  export_parity/ Pine exports replayed through the PineTS oracle [§21.3]
+  export_parity/ generated Pine Script replayed through the PineTS oracle [§22.4]
 tools/
   pinets_oracle/ dev-only fixture generator (AGPL, never shipped)
 policy/          policy.yaml — ALL thresholds live here
@@ -1049,9 +1239,10 @@ runs/
   <id>/          artifacts, seeds, agent transcript, checkpoints
   <id>/verdict.json
   # NOTE: OOS artifacts live OUTSIDE this tree — see §13
-exports/         generated .mq5 / .pine, stamped with the run that justified them
-strategies/      versioned signal blocks + result manifests
-graveyard/       rejected candidates + reasons
+library.db       catalogue: strategies, versions, runs, exports, sessions  [§16]
+artifacts/       content-addressed equity curves, trade lists, transcripts
+exports/         generated .mq5 / .pinescript, stamped and parity-badged
+strategies/      signal-block sources (the catalogue holds their lineage)
 CLAUDE.md / AGENTS.md
 .claude/skills/  signal-blocks, indicators, exemplars
 .mcp.json
@@ -1059,7 +1250,7 @@ CLAUDE.md / AGENTS.md
 
 ---
 
-## 18. Probes
+## 19. Probes
 
 Rev 3 had four. Two are dead, one is measured, one survives. Two are new.
 
@@ -1092,64 +1283,80 @@ format and `tests/store/` covers it. What still needs the owner's actual files, 
 - Spread distribution per session, and the Parquet round-trip being lossless.
 
 **~~Probe 6 — MT5 reconciliation.~~ Dropped at the owner's request.** It is available on demand
-through the MQL5 export instead (§10.2, §21.3). The cost of dropping it is stated in §10.2 and
+through the MQL5 export instead (§10.2, §22.4). The cost of dropping it is stated in §10.2 and
 should be read before trading a number this engine produced.
 
-**Probe 7 — export round-trip (new).** Before building the export UI, prove the loop on one
-trivial strategy: emit Pine, run it through the PineTS oracle, and compare the signal series
-bar-by-bar against the Python original. If that parity harness works end to end, §21 is
-buildable; if it does not, the export feature needs rethinking before any UI is attached.
+**Probe 7 — export parity round-trip (new).** Before any export button exists, prove the loop
+on one trivial strategy: have the agent write the Pine Script, run it through the PineTS
+oracle, and compare the signal series bar-by-bar against the Python original.
+
+Two things this probe actually measures, and the second matters more:
+
+1. **Does the harness work end to end** — can we mechanically detect that a generated export
+   disagrees with its source?
+2. **How often does the agent get it right unprompted?** Run the same block 10 times. If
+   parity passes 10/10, the exemplar and prompt design is sound. If it passes 6/10, that is
+   the real feature: a generate-check-repair loop, not a translate button — and the repair
+   budget needs sizing before the UI is designed. Record the failure modes; they belong in the
+   `indicators` skill (§15) exactly like §9's taxonomy.
 
 ---
 
-## 19. Build order
+## 20. Build order
 
 **Discuss this ordering before following it** — see §0.
 
-0. **Thin vertical slice, first.** One instrument, one month of ticks, one hardcoded strategy,
+0. **Thin vertical slice, first.** One instrument, one month of data, one hardcoded strategy,
    `open_prices` mode, no optimizer, no agent, no UI — and get a trade list and an equity curve
    out. Days, not months, now that both passes are a few hundred lines of numpy/numba. Rev 3
    built five correct subsystems before anything ran end to end; do not repeat that.
-1. **Probe 5** (§18) on the owner's real tick files — density, same-ms clusters, UTC offset.
-   These size the store and settle §4.3; everything downstream inherits them.
+1. **Probe 5** (§19) on the owner's real files — density, duplicate timestamps, GMT offset.
+   These settle §4.3 and size the store; everything downstream inherits them.
 2. **Instrument registry** (§5) — small, everything needs it.
 3. **Store** (§4). Nothing matters until the data is trustworthy. Ingest exists
-   (`engine/store/ingest.py`); bar construction, partitioning and the Parquet layer do not.
-4. **Indicator layer + golden fixtures** (§8). Cheap, and it is the foundation for every signal
-   block.
-5. **Harness + signal-block contract + static validator** (§9).
-6. **Execution engine** (§7, §10), with §10.1 invariants from the first commit, not bolted on
+   (`engine/store/ingest.py`) and reads ticks or bars; bar construction, the resolution rule
+   (§4.6) at run setup, partitioning and the Parquet layer do not.
+4. **Library skeleton** (§16) — catalogue schema and artifact store, *before* the first real
+   run. It is a few tables, and retrofitting lineage onto runs that were never recorded is
+   guesswork. Everything built after this point writes to it.
+5. **Indicator layer + golden fixtures** (§8). Cheap, and the foundation for every signal block.
+6. **Harness + signal-block contract + static validator** (§9).
+7. **Execution engine** (§7, §10), with §10.1 invariants from the first commit, not bolted on
    afterwards. They carry more weight now that MT5 reconciliation is not a gate (§10.2).
-7. **Early agent-hypothesis test.** Before the UI, before the optimizer: with the slice from
+8. **Early agent-hypothesis test.** Before the UI, before the optimizer: with the slice from
    step 0, have the agent generate ~20 signal blocks and read the failure modes. §9 says the
    failure taxonomy is month one's highest-value output — this is where that becomes true. Rev 3
-   put the agent in step 8 and so could not have it before month six.
-8. **Optimization + validation** (§11, §12).
-9. **Export: Probe 7, then MQL5 and Pine** (§21). Deliberately after the engine and validation:
-   an export is only worth having once the thing being exported has been validated, and the
-   MQL5 export is also what makes the §10.2 cross-check available. Pine first — its parity
-   harness runs in CI against the PineTS oracle, so it is the cheaper of the two to get right.
-10. **Chart + results panel** (§15).
-11. **Agent sidebar + generation UI** (§14, §15) last. Easiest to build, most dangerous to
-    trust, worth enabling only once everything downstream is sound.
+   put the agent last and so could not have it before month six.
+9. **Optimization + validation** (§11, §12).
+10. **Export** (§22) — Probe 7 and the parity harness **before** either button. An export is
+    only worth having once the thing being exported has been validated, and under AI generation
+    the parity check is the whole safety mechanism (§22.2). Pine Script first: its check runs in
+    CI against the PineTS oracle, so it is the cheaper of the two to get right.
+11. **Chart + results panel + library UI** (§15, §16).
+12. **Agent sidebar + generation UI** (§15) last. Easiest to build, most dangerous to trust,
+    worth enabling only once everything downstream is sound.
 
-Steps 3 and 4–5 are largely independent and can proceed in parallel, using synthetic ticks for
-the harness work until the store is real.
+Steps 3–5 are largely independent and can proceed in parallel, using synthetic data for the
+harness work until the store is real.
 
 ---
 
-## 20. Open questions
+## 21. Open questions
 
 - **pandas or polars** for ingest and reporting. Polars is faster and has better memory
   behaviour on wide tick data; pandas has broader ecosystem support. Pick one and stay there.
   numpy/numba do the hot work either way, so this is a convenience choice, not a performance one.
 - **Does the owner have tick data for the whole span they care about?** If there are gaps,
   `m1_ohlc` mode (§6) covers them, but the report must mark which spans used which mode.
-- **Pine export scope.** §21 makes it signal-only by default. Is a `strategy()` variant wanted
+- **Pine Script export scope.** §22 makes it signal-only by default. Is a `strategy()` variant wanted
   despite being unreconcilable with this engine's numbers, or is plotting the signals enough?
-- **Same-millisecond tick density** on the owner's real files (Probe 5). May promote §4.4 from a
-  convention to a real sub-ms ordering problem.
-- **The tick files' UTC offset** (§4.3). Inferable from weekend gaps, but must be confirmed.
+- **Duplicate-timestamp density** on the owner's real files (Probe 5). May promote §4.4 from a
+  convention to a real sub-millisecond ordering problem.
+- **The files' GMT offset** (§4.3). Inferable from weekend gaps, but must be confirmed.
+- **Export parity hit-rate** (Probe 7). Decides whether export is a button or a
+  generate-check-repair loop with a budget, and that changes the UI.
+- **Library retention.** Keep-everything is the default (§16.6). Is there any category the
+  owner wants pruned automatically, or is unbounded growth genuinely fine?
 - **Which MQL5 order-execution style** the generated EA should use — market orders with
   attached SL/TP, or pending orders — and whether it should mirror the owner's existing EA's
   conventions so the two are comparable.
@@ -1163,103 +1370,115 @@ the harness work until the store is real.
 
 ---
 
-## 21. Export targets and the execution boundary
+## 22. Export — the agent writes MQL5 and Pine Script
 
-Rev 3 drew the boundary at "output is parameters, not orders" — do not rebuild a working
-execution path. That still holds for *connectivity*: this system never talks to a broker. But
-the boundary moves, because the owner wants to **press a button and get MQL5 or Pine**.
+The owner presses a button and gets **MQL5** or **Pine Script**. The agent writes it, on
+demand, from the strategy's Python source. There is no hand-built transpiler.
 
-### 21.1 Two targets, two purposes
+That is the right call for this system — codegen is what the agent is for, and a transpiler
+covering enough of the language to be useful is months of work that ages badly. But it changes
+what makes the feature safe, and the change is not small.
 
-They are not the same feature and should not be presented as one.
+### 22.1 Two targets, two purposes
 
-| Target | Purpose | Output | Fidelity |
+| Target | Purpose | Output | Parity |
 |---|---|---|---|
-| **MQL5** | **Execution.** Run it on the owner's existing MT5 path | Full `.mq5` EA — order management, SL/TP, sizing, `input` parameters | Intended to be exact. Verifiable (§21.3) |
-| **Pine** | **Visualization and sharing.** See the strategy on a TradingView chart | `indicator()` — plotted levels, arm markers, entry/exit arrows | Signals exact; execution **not modelled** |
+| **MQL5** | **Execution.** Run it on the owner's MT5 path | Full `.mq5` EA — order management, SL/TP, sizing, `input` parameters | Checked in MT5, on demand (§22.4) |
+| **Pine Script** | **Visualization.** See the strategy on a TradingView chart | `indicator()` — plotted levels, arm markers, entry/exit arrows | Checked automatically (§22.4) |
 
-**Pine export is signal-only by default, and that is deliberate.** Pine has no lot model, no
-margin, no swap, no per-broker contract specs — which is precisely the divergence list that
-made rev 3 abandon PineTS as a backtester. Emitting a Pine `strategy()` would reproduce that
-problem on the output side: a TradingView backtest showing different numbers from the ones the
-owner validated, with no way to reconcile. A `strategy()` variant may be offered, but it is
-labelled approximate and its numbers are never quoted as this system's results.
+**Pine Script export is signal-only by default, deliberately.** Pine has no lot model, no
+margin, no swap, no per-broker contract specs — the divergence list that made rev 3 abandon
+PineTS as a backtester (§2). Emitting a Pine `strategy()` would reproduce that problem on the
+output side: a TradingView backtest showing different numbers from the ones the owner
+validated, with nothing to reconcile them against. A `strategy()` variant can be offered, but
+it is labelled approximate and its numbers are never quoted as this system's results.
 
-### 21.2 Why this is tractable — the harness split pays off twice
+### 22.2 A generated export is a claim, not a translation
 
-A general Python→MQL5 transpiler is not a realistic undertaking. A transpiler for **the signal
-block** is, because §9 already restricts it to a narrow subset: a pure function over bar
-series, a whitelisted namespace, no imports, no classes, no position state, no order calls.
-The static validator that makes generation safe defines exactly the subset that makes export
-feasible. That was an unplanned dividend of §9 and it is worth noticing.
+A deterministic transpiler is wrong in *reproducible* ways: it fails the same way every time,
+and a bug once found stays fixed. An LLM translation is wrong in **plausible** ways. It
+produces code that reads correctly, compiles, runs, and computes something subtly different —
+an EMA seeded differently, a condition evaluated on the wrong bar, an off-by-one in a
+lookback.
 
-So export mirrors the harness split:
+This is exactly the failure mode the rest of the plan is built to prevent. §9 removed order
+management from generated code because silent failure there produces a plausible backtest
+rather than an error. The same reasoning applies here with more force, because the output is
+what the owner may actually *trade*.
 
-```
-Strategy  =  harness (fixed)      +  signal block (generated Python)  +  Params
-                  │                            │                          │
-        hand-written template          AST transpile              input declarations
-          per target language                  │                          │
-                  └──────────────► .mq5 / .pine ◄────────────────────────┘
-```
+So the rule, and it is not negotiable:
 
-The harness half is written once per target, by hand, and version-controlled like the Python
-harness. Only the signal block is machine-translated, and only from a subset small enough to
-translate correctly.
+> **An export is presented as verified only when parity has been measured.** Until then it is
+> labelled unverified, and the UI says what that means.
 
-### 21.3 Exports are verified, never trusted
+The parity harness is not a nicety attached to the export feature. Under AI generation it is
+**the entire safety mechanism**, and it should be built before the button that produces
+exports is wired up.
 
-**An export that silently differs from the Python is worse than no export** — the owner would
-trade a strategy that is not the one they validated. So every export carries a parity verdict.
+### 22.3 What makes the generation tractable
 
-- **Pine: automatically verified.** Emit the Pine, run it through the **PineTS oracle already
-  in the repo** (§3), and compare the signal series bar-by-bar against the Python original on
-  the same bars. This runs in CI. It is a second job for a dependency we already carry, and it
-  is the reason to keep carrying it.
-- **MQL5: verified on demand.** Emit the EA, run it in MT5's Strategy Tester over the same
-  span, import the deal list, reconcile trade-by-trade (§10.2). Needs MT5, so it cannot run in
-  CI — but it is the same comparison, on a button.
+The agent is not asked to translate arbitrary Python. §9 already restricts the signal block to
+a pure function over bar series with a whitelisted namespace: no imports, no classes, no
+position state, no order calls. That is a small, regular surface, and it is why this is a
+reasonable thing to ask of a model at all.
 
-Every export is stamped **verified**, **unverified**, or **not exportable**, and the UI shows
-which. An unverified export is never presented as verified.
+What the agent is given:
 
-### 21.4 The exportable subset
+- the signal block source and its params spec
+- the harness contract for the target language — a hand-written, version-controlled MQL5 and
+  Pine Script template implementing the order logic, so only the *signal* half is generated
+- the indicator semantics this system uses (§8), explicitly, including seeding — because
+  "use the built-in EMA" is precisely the silent divergence to avoid
+- the instrument spec (§5) and the run's timeframe
+- previously verified exports of similar blocks, as exemplars (§15)
 
-The §9 validator gains a second, stricter mode: *exportable*. A signal block may be valid
-Python, run fine, and still be non-exportable — that is an acceptable outcome, and it must be
-an explicit one.
+The harness/slot split therefore pays off twice: it made generation safe, and now it makes
+*translation* narrow enough to be checkable.
 
-- Every construct used must have a defined mapping in the target. Where an indicator has no
-  native equivalent, it is **emitted inline as generated code**, never mapped onto a
-  superficially similar built-in with different semantics. (An `ema` that seeds differently is
-  the exact class of silent divergence §8 exists to prevent.)
-- Bar-count lengths export cleanly. Durations (§4.5) must resolve against the target's
-  timeframe at emit time, and the emitted code records the timeframe it was generated for.
-- The export button is **disabled with a stated reason** when the block falls outside the
-  subset. It never emits something approximate and calls it an export.
+### 22.4 Parity harness
 
-### 21.5 Where this leaves the boundary
+**Pine Script — automatic, in CI.** Emit the Pine Script, run it through the **PineTS oracle
+already in the repo** (§3), and compare its signal series bar-by-bar against the Python
+original on the same bars. Tolerance and warmup-NaN parity as in §8.2. This is a second job
+for a dependency we already carry, and the strongest argument for keeping it.
 
-- **This system still never places an order.** It emits source the owner reads, reviews and
-  deploys themselves.
-- The MQL5 export is a starting point for the owner's EA, not a replacement for their
-  execution path. Their existing EA handles connectivity, recovery, and everything that breaks
-  at 3am; a generated EA does not.
-- **The generated EA is the artifact that makes §10.2 possible at all.** Dropping MT5
-  reconciliation as a gate and adding MQL5 export are, conveniently, the same decision viewed
-  from two directions.
+**MQL5 — on demand, in MT5.** Emit the EA, run it in the Strategy Tester over the same span,
+import the deal list, reconcile trade-by-trade (§10.2). Needs MT5, so it cannot run in CI —
+but it is the same comparison, on a button.
 
-### 21.6 UI
+A failed parity check is **not** an error to work around. It is the system reporting that the
+generated code is not the strategy. The agent gets the diff — which bars, which series, how
+far apart — and retries, up to the owner's repair limit (§17). On exhaustion the export is
+marked failed and kept in the library (§16) as evidence, because a translation the agent
+cannot get right is worth knowing about.
 
-In the strategy view and the results panel: `Export → MQL5` and `Export → Pine`, each with a
-parity badge (verified / unverified / not exportable, with the reason). Exports are written to
-`exports/<strategy>/<version>/` and stamped with the policy, store and spec versions that
-produced the validated result — so an exported EA can always be traced back to the run that
-justified it.
+### 22.5 Where this leaves the execution boundary
 
-### 21.7 Feeding reality back
+Rev 3 drew it at "output is parameters, not orders." That still holds for *connectivity* —
+this system never talks to a broker, never places an order. But it no longer holds for
+*artifacts*: we now emit executable code.
+
+- The generated EA is a **starting point the owner reads, reviews and deploys**, not a drop-in
+  replacement for their execution path. Their existing EA handles connectivity, recovery, and
+  everything that breaks at 3am; a generated one does not.
+- Dropping MT5 reconciliation as a build gate (§10.2) and adding MQL5 export are the same
+  decision seen from two directions — the generated EA is what makes that cross-check
+  available at all.
+- **Nothing generated should be traded before its parity check has passed.** The plan says it
+  here, the UI says it on the badge, and the export file carries it in a header comment.
+
+### 22.6 In the UI
+
+`Export → MQL5` and `Export → Pine Script`, in the strategy view and the results panel, each
+showing a parity badge: **verified** (with the date and span it was checked over),
+**unverified**, or **failed** (with the diff). Exports are written to
+`exports/<strategy>/<version>/` and catalogued in the library (§16) with the policy, store and
+spec versions that produced the validated result — so an exported EA can always be traced back
+to the run that justified it.
+
+### 22.7 Feeding reality back
 
 Trade Journal reconciles live results against backtest. **The gap between them is the real
-slippage model** — feed it back into §16's `execution.slippage_params` so the backtest stops
-drifting from reality. With MQL5 export in place this loop closes properly: the same strategy
+slippage model** — feed it back into §17's `execution.slippage_params` so the backtest stops
+drifting from reality. With MQL5 export in place this loop closes properly: one strategy
 definition produces the backtest, the EA, and the live trades being compared.

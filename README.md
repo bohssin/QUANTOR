@@ -1,8 +1,11 @@
 # QUANTOR
 
 Local AI trading agent: chart on the left, agent sidebar on the right. The agent writes
-strategy logic in Python, backtests it against your own tick data, optimizes and validates
-it, across any instrument.
+strategy logic in Python, backtests it against your own data, optimizes and validates it, and
+writes the result out as MQL5 or Pine Script on request.
+
+A **platform, not a script runner** — strategies, versions, runs, verdicts, exports and
+conversations are all catalogued and browsable later. Nothing generated is thrown away.
 
 **Start here: [`trading-agent-plan.md`](trading-agent-plan.md).** Nothing is built yet beyond
 the indicator layer and its parity harness — the plan is the design handoff, and §0 asks you
@@ -18,8 +21,8 @@ owner's own MT5 backtests as the verification ground truth.
 |---|---|
 | `trading-agent-plan.md` | Design plan, rev 4 |
 | `engine/indicators/` | Wilder-family indicators, validated against a PineTS oracle |
-| `engine/store/` | Tick CSV ingest — reads the real feed format, verifies the time unit |
-| `tests/` | 17 passing: indicator parity + ingest |
+| `engine/store/` | CSV ingest — ticks or bars, precision and resolution read from the file |
+| `tests/` | 30 passing: indicator parity + ingest |
 | `tools/pinets_oracle/` | Dev-only fixture generator (AGPL, never shipped) |
 | `bench/` | Reproduces every `[measured]` number in the plan |
 
@@ -30,8 +33,12 @@ owner's own MT5 backtests as the verification ground truth.
     python3 bench/bench_indicators.py      # signal-pass cost
     python3 bench/bench_ticks.py           # ingest, bars, tick-resolution fills
 
-Strategies export to **MQL5** (to run) and **Pine** (to view on TradingView), each with a
-parity verdict rather than on trust — see plan §21.
+**Data in:** your own CSVs — ticks or bars, any instrument, any precision, each with its own
+GMT offset. The file's resolution decides which strategy timeframes it can serve.
+
+**Export:** the agent writes MQL5 (to run) or Pine Script (to view on TradingView) on request.
+Every export carries a measured parity verdict — an AI translation is a claim until checked.
+See plan §22.
 
 ## Licence note
 
