@@ -20,6 +20,12 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+try {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    $OutputEncoding = [System.Text.Encoding]::UTF8
+} catch { }
+
 Set-Location (Join-Path $PSScriptRoot "..")
 $Root = (Get-Location).Path
 $VenvPy = Join-Path $Root ".venv\Scripts\python.exe"
@@ -43,7 +49,7 @@ Write-Host "  QUANTOR"
 Write-Host "  library : $env:QUANTOR_LIBRARY"
 if ($BindHost -eq "0.0.0.0") {
     Write-Host "  open    : http://quantor:$Port   (or http://localhost:$Port)"
-    Write-Host "  note    : reachable from your network — pass -BindHost 127.0.0.1 to keep it local"
+    Write-Host "  note    : reachable from your network - pass -BindHost 127.0.0.1 to keep it local"
 } else {
     Write-Host "  open    : http://${BindHost}:$Port"
 }

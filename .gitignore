@@ -12,16 +12,19 @@ node_modules/
 package-lock.json
 
 # run artifacts
-runs/
+/runs/
 
 # generated per-machine by scripts/setup.sh (holds absolute paths)
 .mcp.json
 .venv/
 
-# app runtime
-.server.pid
-.server.log
-library/
+# app runtime. NOTE the leading slashes: an unanchored `library/` matches a
+# directory of that name at ANY depth, and silently swallowed the whole
+# engine/library package plus tests/library out of the repository. A clone then
+# installed cleanly and failed at import with `No module named engine.library`.
+/.server.pid
+/.server.log
+/library/
 
 # generated sample data (scripts/make_sample_data.py regenerates it)
-data/
+/data/

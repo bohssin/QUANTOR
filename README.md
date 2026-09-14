@@ -53,7 +53,7 @@ UI and the chart are built and tested end to end.
 
 ```bash
 ./scripts/run.sh                 # Linux/macOS
-.\scripts\run.ps1                # Windows
+run.cmd                          # Windows
 ```
 
 Then open **http://quantor:2026**. For the name to resolve, add one line to
@@ -102,10 +102,15 @@ a deliberate choice rather than the default. See
 
 ### Windows
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
-.\scripts\run.ps1
 ```
+setup.cmd      then      run.cmd
+```
+
+Double-click them, or run them from `cmd.exe`. They wrap the PowerShell
+scripts, because `cmd.exe` does not execute `.ps1` files — typing
+`.\scripts\run.ps1` at a `C:\>` prompt silently does nothing, which looks
+exactly like a server that started and said nothing. From PowerShell itself,
+`.\scripts\setup.ps1` and `.\scripts\run.ps1` work directly.
 
 Paths are read by the machine running the server, so a path like
 `C:\Users\HP\Documents\Téléchargements MEGA\xau.csv` works when the server runs

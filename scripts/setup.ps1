@@ -11,6 +11,16 @@
 # only CONNECTION_CLOSED — no traceback, nothing naming the cause.
 
 $ErrorActionPreference = "Stop"
+
+# cmd.exe defaults to a legacy code page, so UTF-8 bytes in this file render as
+# mojibake ("TÃ©lÃ©chargements"). Tell the console what it is receiving, and keep
+# the decorative characters ASCII so it reads correctly even where this fails.
+try {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    $OutputEncoding = [System.Text.Encoding]::UTF8
+} catch { }
+$env:PYTHONUTF8 = "1"
+
 Set-Location (Join-Path $PSScriptRoot "..")
 $Root = (Get-Location).Path
 $Venv = if ($env:QUANTOR_VENV) { $env:QUANTOR_VENV } else { Join-Path $Root ".venv" }
@@ -47,23 +57,32 @@ Write-Host "==> Writing .mcp.json"
 
 Write-Host "==> Running tests"
 & $VenvPy -m pytest tests\ -q
+$TestsFailed = ($LASTEXITCODE -ne 0)
+if ($TestsFailed) {
+    Write-Host ""
+    Write-Host "  !! The test suite did not pass. The doctor below will usually" -ForegroundColor Yellow
+    Write-Host "  !! name the same cause. Do not skip past this." -ForegroundColor Yellow
+}
 
 Write-Host ""
 & $VenvPy quantor_mcp\doctor.py
 $Status = $LASTEXITCODE
+if ($TestsFailed -and $Status -eq 0) { $Status = 1 }
 
 Write-Host @"
 
 Next:
   1. Open the app:
-       .\scripts\run.ps1                 # then http://quantor:2026
+       run.cmd                           # then http://quantor:2026
+
+     (or from PowerShell:  .\scripts\run.ps1)
 
      For the name `quantor` to resolve, add this line to
      C:\Windows\System32\drivers\etc\hosts (edit as Administrator):
 
        127.0.0.1   quantor
 
-     Otherwise use http://localhost:2026 — same thing.
+     Otherwise use http://localhost:2026 - same thing.
 
   2. Load your tick file on the Data page:
 
