@@ -1613,6 +1613,20 @@ results to a directory, printing a summary, and moving on; three weeks later nob
 which parameters produced the good equity curve, or whether a candidate was already tried and
 rejected.
 
+**Built.** `engine/library/` — one SQLite file (`library.db`) plus a content-addressed
+artifact directory. The schema is `engine/library/schema.sql`; `engine/library/store.py` is a
+thin DAO over it, no ORM. Three properties are enforced by the schema rather than left to
+callers, because each is a research-integrity claim: versions form a **tree** (`parent_version`)
+so branching from an older one works; comparison counts accumulate **per family** so the
+deflated Sharpe divides by everything ever tried; and `archived` hides without deleting, so the
+failure taxonomy in §16.4 is a query rather than a memory. Both the MCP server and the API
+server write the file, so the connection opens in WAL mode with a busy timeout.
+
+Bars are cached as an artifact at **M1**, which is what makes the restart worth having: an 11 GB
+tick archive is read once ever, and every coarser timeframe is derived from the cache in
+milliseconds (§4.6). `tests/library/` and `tests/integration/test_app.py` assert survival by
+throwing the first object away and rebuilding from nothing but the files on disk.
+
 ### 16.1 What is persisted
 
 | Entity | Holds | Why it must survive |
@@ -1996,15 +2010,47 @@ What this measures:
    put the agent last and so could not have it before month six.
 9. **Optimization + validation** (§11, §12) — put Optuna behind the existing `ParamSpec` and
    `QuantStats` behind `metrics.py` (§3.1) rather than extending the hand-rolled versions.
-10. **Chart + results panel + library UI** (§15, §16).
-11. **The conversation** (§15.1) — Probe 7, then the chat itself. Last to build, because it is
-    the easiest part and the most dangerous to trust, and because a chat that proposes
-    strategies is only useful once the machinery that evaluates them is sound. It is the
-    headline feature; it is still built last. The MCP server it talks to already exists and is
-    agent-tested (§19, Probe 9).
+10. **Chart + results panel + library UI** (§15, §16). **Done** — `app/ui/`, one dark theme,
+    plain ES modules with no build step. The chart draws the run's own trade list rather than
+    re-deriving signals in the browser (§14.4), so the picture and the number cannot disagree.
+    `scripts/drive_ui.py` drives every page in Chromium and fails on any console error, which
+    is the only way to catch a no-build frontend's real failure mode: a syntax error in one
+    module, served 200, rendering nothing.
+11. **The conversation** (§15.1) — Probe 7, then the chat itself. **Done** — the sidebar is a
+    WebSocket to `claude -p --output-format stream-json`, relaying tool calls and text. No API
+    key: it runs on the owner's own subscription, which was the constraint from line one.
 
 Steps 3–5 are largely independent and can proceed in parallel, using synthetic data for the
 harness work until the store is real.
+
+### Status after the persistence and UI pass
+
+| Step | State |
+|---|---|
+| 0. Vertical slice | done |
+| 1. Probe 5 on real files | **blocked** — the owner's 11 GB archive is on a Windows machine; the streaming path is proven on generated files instead |
+| 2. Instrument registry | done (§5, per-source, never a shared default) |
+| 3. Store | done — ingest, bar construction, §4.6 resolution rule, and constant-memory streaming |
+| 4. Library skeleton | done — `engine/library/`, SQLite + content-addressed artifacts |
+| 5. Indicators + golden fixtures | done |
+| 6. Harness + signal-block contract | done |
+| 7. Tick-mode fills + VectorBT cross-check | **not done** — the bar engine and its §10.1 invariants exist; `real_ticks` does not |
+| 8. Early agent-hypothesis test | done (§19 Probe 9, and a live 12-turn session with zero tool errors) |
+| 9. Optimization + validation | done, hand-rolled; Optuna/QuantStats still deferred |
+| 10. Chart + results + library UI | done |
+| 11. The conversation | done |
+
+**What replaced cross-symbol survival.** It was dropped at the owner's direction, and the
+robustness load moved onto walk-forward efficiency, the plateau test, the cumulative
+comparison count — and one thing this rev added that the plan did not have:
+
+**The control test (§13).** Re-run the strategy on **shuffled bar-to-bar returns**: same
+distribution, same volatility, same costs, same bar count, order destroyed. Order is the only
+thing any of these strategies can read, so an edge that survives the shuffle is look-ahead, a
+sizing artifact, or nothing — and every one of those survives a walk-forward that looks fine.
+It cost twenty lines, it is a button and an MCP tool, and it is the first thing to run before
+believing a number. On the strategy built in this pass it moved expectancy from +0.563R to
+−0.030R, which is what a real, order-dependent edge is supposed to do.
 
 ---
 
