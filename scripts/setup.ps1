@@ -67,6 +67,25 @@ if ($TestsFailed) {
     Write-Host "  !! name the same cause. Do not skip past this." -ForegroundColor Yellow
 }
 
+# Add the hosts entry if we can, so `quantor:2026` resolves without anyone
+# opening an editor as Administrator. Silently skipped when not elevated —
+# localhost works either way, and failing setup over a nicety would be worse.
+$IsAdmin = ([Security.Principal.WindowsPrincipal] `
+    [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
+$HostsFile = "$env:SystemRoot\System32\drivers\etc\hosts"
+$HostsDone = $false
+try {
+    $existing = if (Test-Path $HostsFile) { Get-Content $HostsFile -ErrorAction Stop } else { @() }
+    if ($existing -match '^\s*[\d\.]+\s+quantor\s*$') {
+        $HostsDone = $true
+    } elseif ($IsAdmin) {
+        Add-Content -Path $HostsFile -Value "`r`n127.0.0.1   quantor" -ErrorAction Stop
+        $HostsDone = $true
+        Write-Host "==> Added '127.0.0.1   quantor' to the hosts file"
+    }
+} catch { }
+
 Write-Host ""
 & $VenvPy quantor_mcp\doctor.py
 $Status = $LASTEXITCODE
@@ -80,26 +99,27 @@ Next:
 
      (or from PowerShell:  .\scripts\run.ps1)
 
-     For the name `quantor` to resolve, add this line to
-     C:\Windows\System32\drivers\etc\hosts (edit as Administrator):
+     It opens your browser by itself. $(if ($HostsDone) {
+       "The name 'quantor' already resolves."
+     } else {
+       "Use http://localhost:2026 - or run this
+     script as Administrator once and 'quantor' will resolve too."
+     })
 
-       127.0.0.1   quantor
+  2. Your data files are found for you.
 
-     Otherwise use http://localhost:2026 - same thing.
+     The Data page lists the CSVs on this machine, largest first, with the
+     name, timeframe and base already filled in. Press "Load this".
 
-  2. Load your tick file on the Data page:
+     Check ONE field before you do: the GMT offset. It is the only thing the
+     file cannot tell you, vendors differ, and getting it wrong shifts every
+     daily boundary. A GMT+3 export needs 3.
 
-       name             xau
-       path             C:\Users\HP\Documents\Téléchargements MEGA\xau.csv
-       timeframe        M1
-       base timeframe   S1
-       GMT offset       3
+     For a tick archive leave the base on S1. The engine fills on bars, so S1
+     underneath an M1 strategy is what settles which of the stop and the target
+     was hit first; without it the engine assumes the stop.
 
-     S1 is the one that matters for a tick archive: the engine fills on bars,
-     so S1 underneath an M1 strategy is what settles which of the stop and the
-     target was hit first. Without it the engine assumes the stop.
-
-  3. Sign in to LuxAlgo (free; the token is stored per machine):
-       npx -y @luxalgo/mcp login
+  3. LuxAlgo is already signed in on this machine if `npx -y @luxalgo/mcp login`
+     has been run once.
 "@
 exit $Status

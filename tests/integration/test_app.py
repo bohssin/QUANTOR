@@ -11,6 +11,7 @@ from __future__ import annotations
 import datetime as dt
 import importlib
 import json
+import time
 
 import numpy as np
 import pytest
@@ -202,3 +203,78 @@ def test_the_sidebar_socket_accepts_a_connection(client):
         assert first["type"] in ("start", "error")
         if first["type"] == "error":
             assert "claude" in first["text"].lower()
+
+
+# --- nothing to type ------------------------------------------------------------
+
+def test_discovery_finds_a_csv_and_fills_in_the_form(client, tmp_path):
+    """Typing a path is a step that can only go wrong; the machine knows."""
+    from app.api.discover import sniff
+
+    ticks = tmp_path / "xauusd_ticks.csv"
+    rows = ["timestamp,bidPrice,askPrice"]
+    rows += [f"2022-01-03 00:0{i % 10}:00.000,1900.{i:03d},1900.{i + 2:03d}"
+             for i in range(40_000)]
+    ticks.write_text("\n".join(rows) + "\n")
+
+    found = sniff(ticks)
+    assert found is not None, "a 1 MB+ tick CSV must be recognised"
+    assert found.kind == "tick"
+    assert found.columns == ["timestamp", "bidPrice", "askPrice"]
+    assert found.suggested_base == "S1", "tick archives default to an S1 base"
+    assert found.suggested_name == "xauusd_ticks"
+    assert "GB" in found.size or "MB" in found.size
+
+
+def test_discovery_ignores_files_that_are_not_market_data(tmp_path):
+    from app.api.discover import sniff
+
+    small = tmp_path / "tiny.csv"
+    small.write_text("timestamp,bid,ask\n2022-01-01 00:00:00,1,2\n")
+    assert sniff(small) is None, "a 40-byte file is not an archive"
+
+    big_but_wrong = tmp_path / "notes.csv"
+    big_but_wrong.write_text("name,address\n" + "a,b\n" * 200_000)
+    assert sniff(big_but_wrong) is None, "no timestamp column, not data"
+
+
+def test_a_long_load_runs_as_a_job_with_progress(client, tmp_path):
+    """A 15-minute synchronous POST is not slow, it is broken."""
+    http, _ = client
+    csv = tmp_path / "bars.csv"
+    _bars_csv(csv, 3_000)
+
+    started = http.post("/api/data/start", json={
+        "name": "async", "path": str(csv), "timeframe": "M15"}).json()
+    assert started["status"] in ("queued", "running")
+    assert "job_id" in started
+
+    for _ in range(100):
+        job = http.get(f"/api/jobs/{started['job_id']}").json()
+        if job["done"]:
+            break
+        time.sleep(0.1)
+
+    assert job["status"] == "ok", job.get("error")
+    assert job["result"]["name"] == "async"
+    assert job["rows"] > 0
+    assert [d["name"] for d in http.get("/api/data").json()] == ["async"]
+
+
+def test_a_failed_load_reports_why_on_the_job(client):
+    http, _ = client
+    started = http.post("/api/data/start", json={
+        "name": "nope", "path": r"C:\does\not\exist.csv", "timeframe": "M15"}).json()
+    for _ in range(100):
+        job = http.get(f"/api/jobs/{started['job_id']}").json()
+        if job["done"]:
+            break
+        time.sleep(0.1)
+    assert job["status"] == "error"
+    assert "FileNotFoundError" in job["error"]
+    assert "machine running this server" in job["error"]
+
+
+def test_an_unknown_job_is_a_404(client):
+    http, _ = client
+    assert http.get("/api/jobs/deadbeef").status_code == 404

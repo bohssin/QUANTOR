@@ -28,6 +28,26 @@ import numpy as np
 
 __all__ = ["Artifacts"]
 
+#: Parquet's magic bytes, and gzip's. Stored blobs are sniffed rather than
+#: labelled, so an artifact written by an older build still reads.
+_PARQUET_MAGIC = b"PAR1"
+_GZIP_MAGIC = b"\x1f\x8b"
+
+#: zstd where available, snappy otherwise. NOT gzip: gzip compresses these
+#: arrays at roughly 25 MB/s, which on the 6.7M S1 bars of a 300 MB tick file
+#: is ~45 seconds of silent wait after a 15-second read `[measured]`, and on an
+#: 11 GB archive would be minutes. zstd does the same job an order of magnitude
+#: faster and smaller on columnar floats.
+def _codec() -> str:
+    import pyarrow as pa
+    for name in ("zstd", "lz4", "snappy"):
+        try:
+            pa.Codec(name)
+            return name
+        except Exception:                                   # noqa: BLE001
+            continue
+    return "none"
+
 
 class Artifacts:
     """Immutable blobs on disk, named by their own sha256."""
@@ -60,13 +80,37 @@ class Artifacts:
     def put_arrays(self, arrays: dict[str, np.ndarray]) -> str:
         """Store named numpy arrays — cached bars, equity curves, trade columns.
 
-        `mtime=0` on the gzip header and sorted keys keep the bytes a pure
-        function of the content: the same bars always land on the same digest,
-        rather than on a new one every time they are saved.
+        Two shapes, two formats. Arrays that are all the same length are a table
+        (bar series, overwhelmingly the large case) and go to **Parquet**, which
+        is columnar, typed, and compresses numeric data an order of magnitude
+        faster than gzip. Ragged sets — an equity curve beside a trade list —
+        are not a table, are small, and stay in a compressed npz.
+
+        Either way the bytes are a pure function of the content, so the same
+        bars always land on the same digest instead of a new one each save.
         """
+        clean = {k: np.ascontiguousarray(v) for k, v in sorted(arrays.items())}
+        lengths = {a.shape[0] for a in clean.values() if a.ndim == 1}
+        rectangular = (clean and len(lengths) == 1
+                       and all(a.ndim == 1 for a in clean.values()))
+
+        if rectangular:
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+
+            table = pa.table({k: pa.array(v) for k, v in clean.items()})
+            buf = pa.BufferOutputStream()
+            pq.write_table(table, buf, compression=_codec(),
+                           # Deterministic bytes: no creation timestamp, no
+                           # per-write statistics that vary with buffering.
+                           write_statistics=False, store_schema=True)
+            return self.put_bytes(buf.getvalue().to_pybytes())
+
         buf = io.BytesIO()
-        np.savez(buf, **{k: np.ascontiguousarray(v) for k, v in sorted(arrays.items())})
-        return self.put_bytes(gzip.compress(buf.getvalue(), mtime=0))
+        np.savez(buf, **clean)
+        # Level 1: these are already small, and the default level 9 costs ~6x
+        # the time for a few percent of size.
+        return self.put_bytes(gzip.compress(buf.getvalue(), compresslevel=1, mtime=0))
 
     # --- reading ---------------------------------------------------------
 
@@ -80,9 +124,18 @@ class Artifacts:
         return json.loads(gzip.decompress(self.get_bytes(digest)))
 
     def get_arrays(self, digest: str) -> dict[str, np.ndarray]:
-        raw = gzip.decompress(self.get_bytes(digest))
-        with np.load(io.BytesIO(raw)) as npz:
-            return {k: npz[k] for k in npz.files}
+        raw = self.get_bytes(digest)
+        if raw[:4] == _PARQUET_MAGIC:
+            import pyarrow.parquet as pq
+
+            table = pq.read_table(io.BytesIO(raw))
+            return {name: table.column(name).to_numpy(zero_copy_only=False)
+                    for name in table.column_names}
+        if raw[:2] == _GZIP_MAGIC:
+            with np.load(io.BytesIO(gzip.decompress(raw))) as npz:
+                return {k: npz[k] for k in npz.files}
+        raise ValueError(
+            f"artifact {digest[:12]}... is neither Parquet nor a gzipped npz")
 
     # --- housekeeping ----------------------------------------------------
 

@@ -4,7 +4,8 @@ import { api, el, num, int, pct, ago, toast, withBusy, dataTable } from '../api.
 import { remember, refreshRailStats } from '../app.js';
 
 export async function renderData(root) {
-  const sources = await api.listData();
+  const [sources, jobs] = await Promise.all([api.listData(), api.jobs()]);
+  const running = jobs.find(j => !j.done);
 
   const name = el('input', { class: 'mono', placeholder: 'xau' });
   const path = el('input', { class: 'mono', placeholder: '/home/you/data/xau.csv' });
@@ -82,6 +83,9 @@ export async function renderData(root) {
         'small one. Bars are cached at M1, so every coarser timeframe afterwards is free. ' +
         'Paths are read on the machine running this server.')),
 
+    progressCard(running, root),
+    discoveredCard(root),
+
     el('div', { class: 'card' },
       el('h2', {}, 'Loaded sources'),
       sources.length
@@ -90,6 +94,143 @@ export async function renderData(root) {
             el('strong', {}, 'No data loaded'),
             'Point the form above at a CSV on this machine.')),
   );
+}
+
+// --- files found on this machine ---------------------------------------------
+
+function discoveredCard(root) {
+  const host = el('div', { class: 'card' },
+    el('h2', {}, 'Found on this machine'),
+    el('div', { class: 'loading' }, el('span', { class: 'spin' }), ' Looking…'));
+
+  api.discover().then(found => {
+    host.replaceChildren(
+      el('div', { class: 'card-head' },
+        el('h2', {}, 'Found on this machine'),
+        el('span', { class: 'faint', style: 'font-size:11.5px' },
+          `${found.length} candidate${found.length === 1 ? '' : 's'}, largest first`)),
+      found.length
+        ? el('div', { class: 'stack' }, found.map(c => candidateCard(c, root)))
+        : el('div', { class: 'empty' },
+            el('strong', {}, 'Nothing found automatically'),
+            'Looked in Documents, Downloads, Desktop and MEGA folders for CSVs ' +
+            'with a timestamp column. Use the form above if your file is elsewhere.'));
+  }).catch(err => {
+    host.replaceChildren(el('div', { class: 'verdict warn' },
+      el('b', {}, 'Could not scan for files'), err.message));
+  });
+  return host;
+}
+
+function candidateCard(c, root) {
+  const nameInput = el('input', { class: 'mono', value: c.suggested_name });
+  const offsetInput = el('input', { class: 'mono', type: 'number', step: '0.25',
+                                    value: '0', style: 'max-width:90px' });
+  const tfSelect = el('select', { style: 'max-width:110px' },
+    ['M1', 'M5', 'M15', 'M30', 'H1'].map(t =>
+      el('option', { value: t, selected: t === (c.suggested_timeframe || 'M15') }, t)));
+  const baseSelect = el('select', { style: 'max-width:130px' },
+    el('option', { value: '' }, 'M1 (smaller)'),
+    ['S1', 'S5', 'S15', 'S30'].map(t =>
+      el('option', { value: t, selected: t === c.suggested_base }, t)));
+
+  return el('div', { class: 'card tight', style: 'background:var(--surface-2);margin:0' },
+    el('div', { class: 'card-head' },
+      el('div', {},
+        el('h2', { style: 'margin:0' }, c.name, '  ',
+          el('span', { class: 'pill info' }, c.kind),
+          ' ', el('span', { class: 'pill' }, c.size)),
+        el('div', { class: 'faint mono', style: 'font-size:11px;margin-top:4px' }, c.path),
+        el('div', { class: 'faint mono', style: 'font-size:11px' },
+          `columns: ${c.columns.join(', ')}`),
+        el('div', { class: 'faint mono', style: 'font-size:11px' },
+          `first row: ${c.first_row}`)),
+      el('button', {
+        class: 'primary',
+        onclick: e => withBusy(e.currentTarget, async () => {
+          const job = await api.startLoad({
+            name: nameInput.value.trim() || c.suggested_name,
+            path: c.path,
+            timeframe: tfSelect.value,
+            base_timeframe: baseSelect.value,
+            utc_offset_hours: Number(offsetInput.value),
+          });
+          toast(`Loading ${job.label} — this page shows progress`, 'good');
+          renderData(root);
+        }, 'Starting'),
+      }, 'Load this')),
+
+    el('div', { class: 'row', style: 'margin-top:4px' },
+      el('div', { class: 'field' }, el('label', {}, 'Name'), nameInput),
+      el('div', { class: 'field' }, el('label', {}, 'Timeframe'), tfSelect),
+      el('div', { class: 'field' }, el('label', {}, 'Base'), baseSelect),
+      el('div', { class: 'field' },
+        el('label', { title: 'Hours east of UTC. A GMT+3 export is 3.' }, 'GMT offset'),
+        offsetInput)),
+
+    c.note ? el('div', { class: 'verdict', style: 'margin:10px 0 0' }, c.note) : null,
+    el('div', { class: 'verdict warn', style: 'margin:10px 0 0' },
+      el('b', {}, 'The GMT offset is the one thing the file cannot tell you'),
+      'Vendors differ and the file rarely says. Getting it wrong shifts every ' +
+      'daily boundary and every session filter. A GMT+3 export needs 3.'));
+}
+
+// --- a load in flight ---------------------------------------------------------
+
+function progressCard(job, root) {
+  if (!job) return null;
+  const host = el('div', { class: 'card' });
+
+  function paint(j) {
+    const pctDone = j.total_bytes && j.rows
+      ? null                    // rows read is known; bytes consumed is not
+      : null;
+    host.replaceChildren(
+      el('div', { class: 'card-head' },
+        el('h2', {}, 'Loading  ', el('span', { class: 'pill live' }, j.status)),
+        el('span', { class: 'faint mono', style: 'font-size:11.5px' }, j.label)),
+      el('div', { class: 'metrics' },
+        el('div', { class: 'metric' }, el('div', { class: 'k' }, 'Rows read'),
+          el('div', { class: 'v' }, int(j.rows))),
+        el('div', { class: 'metric' }, el('div', { class: 'k' }, 'Bars built'),
+          el('div', { class: 'v' }, int(j.bars))),
+        el('div', { class: 'metric' }, el('div', { class: 'k' }, 'Rows / second'),
+          el('div', { class: 'v' }, int(j.rows_per_second))),
+        el('div', { class: 'metric' }, el('div', { class: 'k' }, 'Elapsed'),
+          el('div', { class: 'v' }, `${Math.round(j.seconds)}s`)),
+        el('div', { class: 'metric' }, el('div', { class: 'k' }, 'File'),
+          el('div', { class: 'v' }, `${(j.total_bytes / (1 << 30)).toFixed(2)} GB`))),
+      el('div', { class: 'faint', style: 'margin-top:9px;font-size:11.5px' },
+        j.rows && j.message === 'reading'
+          ? 'Reading and folding into bars. When the row count stops rising the ' +
+            'read is done and the bars are being written to the library — that ' +
+            'part reports no rows, and is the shorter half.'
+          : 'Starting…'));
+  }
+  paint(job);
+
+  const timer = setInterval(async () => {
+    try {
+      const j = await api.job(job.job_id);
+      paint(j);
+      if (j.done) {
+        clearInterval(timer);
+        if (j.status === 'ok') {
+          toast(`Loaded ${j.result.name}: ${int(j.result.rows)} rows -> ` +
+                `${int(j.result.base_bars)} ${j.result.base_timeframe} bars ` +
+                `in ${j.result.seconds}s`, 'good');
+        } else {
+          toast(j.error || 'the load failed', 'bad');
+        }
+        refreshRailStats();
+        renderData(root);
+      }
+    } catch (err) {
+      clearInterval(timer);
+    }
+  }, 1500);
+
+  return host;
 }
 
 function sourceCard(s, root) {

@@ -35,10 +35,14 @@ sys.path.insert(0, str(ROOT))
 from engine.service import Quantor           # noqa: E402
 from engine.store import TIMEFRAMES          # noqa: E402
 
+from .discover import discover, sniff        # noqa: E402
+from .jobs import JobRunner                  # noqa: E402
+
 UI = ROOT / "app" / "ui"
 
 app = FastAPI(title="QUANTOR", docs_url="/api/docs", openapi_url="/api/openapi.json")
 QUANTOR = Quantor(os.environ.get("QUANTOR_LIBRARY") or None)
+JOBS = JobRunner()
 
 
 # --- request bodies ----------------------------------------------------------
@@ -174,6 +178,56 @@ def list_data() -> list[dict[str, Any]]:
 @app.post("/api/data")
 def load_data(body: LoadData) -> dict[str, Any]:
     return _guard(QUANTOR.load_data, **body.model_dump())
+
+
+@app.get("/api/data/discover")
+def discover_data(extra: str = "") -> list[dict[str, Any]]:
+    """Data files on this machine, so nobody types a path."""
+    return _guard(discover, [e for e in extra.split("|") if e])
+
+
+@app.post("/api/data/start")
+def start_load(body: LoadData) -> dict[str, Any]:
+    """Begin a load and return a job to poll.
+
+    The synchronous POST stays for scripts and tests. The UI uses this one,
+    because folding an 11 GB archive into bars takes minutes and a browser will
+    not wait that long — it times out and the work finishes for nobody.
+    """
+    args = body.model_dump()
+    src = Path(args["path"]).expanduser()
+    total = src.stat().st_size if src.exists() else 0
+
+    def work(job):
+        job.total_bytes = total
+        job.message = "reading"
+
+        def progress(rows: int, bars: int) -> None:
+            job.rows, job.bars = rows, bars
+
+        out = QUANTOR.load_data(**args, progress=progress)
+        job.rows, job.bars = out["rows"], out["base_bars"]
+        job.message = "done"
+        return out
+
+    try:
+        job = JOBS.start("load", f"{body.name} <- {Path(body.path).name}", work)
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return job.as_dict()
+
+
+@app.get("/api/jobs")
+def list_jobs() -> list[dict[str, Any]]:
+    return [j.as_dict() for j in JOBS.all()]
+
+
+@app.get("/api/jobs/{job_id}")
+def get_job(job_id: str) -> dict[str, Any]:
+    job = JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(404, f"no job {job_id}")
+    return job.as_dict()
 
 
 @app.delete("/api/data/{name}")

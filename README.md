@@ -77,8 +77,11 @@ Four pages and a sidebar, all dark:
   equity curve panned in step below, and a trade table that scrolls the chart
   to any trade. The markers are the engine's trades, never re-derived in the
   browser, so the picture and the number cannot disagree.
-- **Data** — load a tick or bar CSV, read its quality report, see which
-  timeframes it can serve.
+- **Data** — the CSVs on this machine are found for you and listed largest
+  first, with the name, timeframe and base already filled in; press "Load this".
+  Large loads run as a background job with live progress, because a fifteen-minute
+  synchronous request is not slow, it is broken. Check one field before loading:
+  the GMT offset is the only thing a file cannot tell you.
 - **History** — every run ever made, reopenable, including the failed ones.
 - **Assistant** — Claude Code over a WebSocket, driving the same MCP tools.
   No API key: it runs on your own subscription.
@@ -105,6 +108,10 @@ a deliberate choice rather than the default. See
 ```
 setup.cmd      then      run.cmd
 ```
+
+`run.cmd` opens your browser by itself. Run `setup.cmd` once as Administrator
+and it adds `127.0.0.1 quantor` to your hosts file so `quantor:2026` resolves;
+otherwise `localhost:2026` is the same thing.
 
 Double-click them, or run them from `cmd.exe`. They wrap the PowerShell
 scripts, because `cmd.exe` does not execute `.ps1` files — typing

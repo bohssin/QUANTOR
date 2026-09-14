@@ -16,7 +16,8 @@
 param(
     [int]$Port = 2026,
     [string]$BindHost = "0.0.0.0",
-    [switch]$Reload
+    [switch]$Reload,
+    [switch]$NoBrowser
 )
 
 $ErrorActionPreference = "Stop"
@@ -56,6 +57,23 @@ if ($BindHost -eq "0.0.0.0") {
     Write-Host "  open    : http://${BindHost}:$Port"
 }
 Write-Host ""
+
+# Open the browser once the server answers. A background job rather than a
+# delay: guessing how long uvicorn takes to bind is how you get a browser
+# showing "connection refused" on a slow machine.
+if (-not $NoBrowser) {
+    $url = if ($BindHost -eq "0.0.0.0") { "http://localhost:$Port" } else { "http://${BindHost}:$Port" }
+    Start-Job -ScriptBlock {
+        param($u)
+        for ($i = 0; $i -lt 60; $i++) {
+            try {
+                Invoke-WebRequest -Uri "$u/api/health" -TimeoutSec 2 -UseBasicParsing | Out-Null
+                Start-Process $u
+                return
+            } catch { Start-Sleep -Milliseconds 500 }
+        }
+    } -ArgumentList $url | Out-Null
+}
 
 $uvicornArgs = @("-m", "uvicorn", "app.api.main:app", "--host", $BindHost, "--port", "$Port")
 if ($Reload) { $uvicornArgs += "--reload" }

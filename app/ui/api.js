@@ -25,6 +25,10 @@ export const api = {
 
   listData:     ()              => request('GET', '/api/data'),
   loadData:     (body)          => request('POST', '/api/data', body),
+  discover:     ()              => request('GET', '/api/data/discover'),
+  startLoad:    (body)          => request('POST', '/api/data/start', body),
+  job:          (id)            => request('GET', `/api/jobs/${id}`),
+  jobs:         ()              => request('GET', '/api/jobs'),
   deleteData:   (name)          => request('DELETE', `/api/data/${encodeURIComponent(name)}`),
 
   strategies:   (archived)      => request('GET', `/api/strategies?include_archived=${archived ? 'true' : 'false'}`),
