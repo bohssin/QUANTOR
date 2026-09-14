@@ -73,6 +73,10 @@ Four pages and a sidebar, all dark:
 Large files stream. A 295 MB tick CSV loads in ~24 s at flat memory; bars are
 cached at M1, so every coarser timeframe afterwards is free.
 
+A worked example — hypothesis, rejection, revision, control test and
+walk-forward, with the numbers and the bugs it exposed — is in
+[`docs/FINDINGS.md`](docs/FINDINGS.md).
+
 ### The control test
 
 The cheapest way to tell a real edge from a bug: re-run the strategy on
