@@ -46,8 +46,9 @@ owner's own MT5 backtests as the verification ground truth.
 GMT offset. The file's resolution decides which strategy timeframes it can serve.
 
 **The agent is MCP-first, with no API keys** (plan §14): Claude Code on your own
-subscription, talking to the LuxAlgo Library, Edge Stats, Prop Firm Sim, and QUANTOR's own
-engine as MCP servers. It reads Library Pine source to *understand* a concept and emits **one
+subscription, talking to LuxAlgo's MCP server (run it locally: `npx -y @luxalgo/mcp`) and
+QUANTOR's own engine as MCP servers. Note `library_*` needs a paid LuxAlgo plan; `edge_*` is
+keyless and is the one you want first anyway. It reads Library Pine source to *understand* a concept and emits **one
 artifact — a Python signal block**. The chart then draws that run's own entries and exits, so
 what you look at is exactly what was measured.
 

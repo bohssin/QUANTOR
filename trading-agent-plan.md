@@ -1109,21 +1109,49 @@ That is the design. The rest of this section is its consequences.
 
 | Server | Transport | What the agent uses it for |
 |---|---|---|
-| **LuxAlgo Library** | HTTP — `claude mcp add --transport http luxalgo https://mcp.luxalgo.com/mcp` | **Understand a concept.** Read real Pine source to learn what an order block or an FVG actually *is*, then implement it in Python |
-| **Edge Stats** | stdio | Conditional frequencies over M1 bars, N and a Wilson CI on every answer. "Does this setup even occur, and how often" — *before* writing a strategy for it |
-| **Prop Firm Sim** | stdio | Block-bootstrap Monte Carlo over the R-multiple series a backtest produced |
+| **LuxAlgo** | local stdio — `npx -y @luxalgo/mcp` (hosted: `claude mcp add --transport http luxalgo https://mcp.luxalgo.com/mcp`) | 35 tools across `library_*`, `edge_*`, `propfirms_*`, `trackers_*`, `broker_*`. **One server covers three of the four rows below** |
+| ↳ its `edge_*` tools | — | Conditional frequencies over M1 bars. "Does this setup even occur, and how often" — *before* writing a strategy for it. **Keyless and working** |
+| ↳ its `propfirms_*` tools | — | Monte Carlo over an R-multiple series. **Works offline** with an inline `spec` |
 | **QUANTOR engine** | stdio, **ours** | Run backtests, sweeps, validation; read results; render on the chart (§14.2) |
 
-**Unverified from the development environment.** `mcp.luxalgo.com:443` is denied by the egress
-policy there (403 on CONNECT), and with the HTTP transport configured the session reports the
-server as `needs-auth`. Whether that reflects a genuine auth requirement or just the blocked
-host cannot be distinguished from behind the proxy, so **confirm the tool surface on the
-owner's machine** before building anything that assumes a particular set of `library_*` tools.
+#### Measured: run it locally, and the Library needs a paid plan
 
-What *was* verified: a configured-but-unavailable server degrades gracefully — the session ran
-normally on the remaining server and answered correctly, it simply had fewer tools. Which is
-exactly why a run must check the status rather than trust that configuration equals
-availability.
+The hosted HTTP endpoint (`mcp.luxalgo.com`) is blocked by the development environment's egress
+policy, but **the local stdio server is the answer anyway** and it is a plain npm package:
+
+    npx -y @luxalgo/mcp                      # or: claude mcp add luxalgo -- npx -y @luxalgo/mcp
+
+Installed and driven directly `[measured]`, `@luxalgo/mcp@1.4.1` (MIT) starts offline and
+exposes **35 tools** in five families — `library_*` (9), `propfirms_*` (12), `trackers_*` (4),
+`edge_*` (3), `broker_*` (6). Running locally is also what brings the `broker_*` tools into
+view at all. But what the tools actually *return* differs sharply, and the plan has been wrong
+about this since rev 3:
+
+| Family | Status `[measured]` |
+|---|---|
+| **`edge_*`** | **Works, keyless.** `edge_symbols` returned real 1m coverage (BTCUSDT, 2020-01-01 → 2026-09-12, session counts); `edge_presets` returned 11 preset categories in full |
+| **`propfirms_*`** | **Simulation works offline** with an inline `spec` — the Monte Carlo core is bundled. The firm *directory* is gated |
+| **`library_*`** | **Gated behind a paid LuxAlgo plan.** Every call returns LuxAlgo's own message: *"Your LuxAlgo plan does not include this: LuxAlgo API 403 for /api/library/concepts. Upgrading … unlocks it."* |
+| `broker_*`, `trackers_*` | Untested — broker needs credentials |
+
+**This is not the egress block.** The proxy's failure log names only `mcp.luxalgo.com:443`; the
+local server's Library calls reached LuxAlgo's API and were refused *by LuxAlgo*, in LuxAlgo's
+own words. Earlier revisions of this plan described the Library as "keyless with 850+ concepts",
+which came from marketing copy rather than a call. **The server is keyless to run; the Library
+content is not free.**
+
+**What this costs.** §14.9's whole premise — screening published Library strategies as a source
+— requires that plan. So does using the Library as a concept reference (§8's parity work is
+partly justified by it). Without a subscription the system still works: the agent writes
+strategies from the owner's own descriptions, and **Edge Stats still answers "does this setup
+even occur"**, which is the highest-value pre-code check in §15.1.1 and it is free. Treat the
+Library as an *optional accelerant*, not a dependency — nothing downstream should fail when it
+is absent.
+
+**Also verified:** a configured-but-unavailable server degrades silently. The session ran
+normally on the remaining server and answered correctly, it simply had fewer tools and was
+never told. Which is exactly why a run must check `system/init` status rather than trust that
+configuration equals availability.
 
 The Library is used two ways, and both emit Python only — no Pine is generated, stored or run:
 
@@ -1265,6 +1293,9 @@ keep the runtime swappable so adding it later is cheap, but nothing in the plan 
 it.
 
 ### 14.9 Screening the Library as a strategy source
+
+> **Requires a paid LuxAlgo plan** (§14.1) — `library_*` returns a plan-gated 403 without one.
+> Everything else in this plan works without it; this section does not.
 
 The Library holds hundreds of published strategies. Porting them to Python,
 backtesting them on the owner's data, and generating variants is a far more
@@ -1784,8 +1815,28 @@ That is the whole point of §12 reaching the agent intact. It did not keep tunin
 something looked good — it concluded the edge was not there, which on noise is the correct
 answer. The machinery and the agent's reading of it both work.
 
-**Left for a local run:** the LuxAlgo tool surface (see §14.1 — blocked host here), and
-`--resume` across a restart.
+**5. The whole workflow verified against both servers at once.** A session was given the
+QUANTOR engine *and* the local LuxAlgo server and asked to report honestly which LuxAlgo tools
+work, then build and validate a strategy regardless. 13 turns, $0.28.
+
+It reported `edge_presets` working (41 presets, full catalogue) and `library_search` gated with
+LuxAlgo's 403, and then — the part that matters —
+
+> I did not fabricate one — the strategy below is a standard, self-written implementation …
+> not a LuxAlgo-sourced concept.
+
+It did not invent a Library concept it could not read. It then ran the engine end to end and
+reported walk-forward efficiency **−0.039**, noting that the grid's in-sample "best" parameters
+were *themselves negative in all four folds*, and that the single positive out-of-sample fold
+came from only 52 trades and looked like noise. Verdict: does not generalize, would not trade,
+needs a different signal rather than retuning the same skeleton.
+
+Two `Bash` attempts were denied across the sessions — it still reaches for the shell
+occasionally even when the tools work, which is the argument for keeping `--allowedTools`
+scoped rather than relying on instructions.
+
+**Left for a local run:** a LuxAlgo plan to unlock `library_*` (§14.1), and `--resume` across a
+restart.
 
 Codex is out of scope (§14.7).
 
