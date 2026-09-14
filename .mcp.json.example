@@ -1,0 +1,18 @@
+{
+  "_comment": "Template. Run ./scripts/setup.sh (or: python3 quantor_mcp/doctor.py --write-config) to generate .mcp.json with your real interpreter and absolute paths. The interpreter MUST have `mcp` installed or the client reports only CONNECTION_CLOSED.",
+  "mcpServers": {
+    "quantor-engine": {
+      "command": "/absolute/path/to/.venv/bin/python",
+      "args": [
+        "/absolute/path/to/QUANTOR/quantor_mcp/server.py"
+      ]
+    },
+    "luxalgo": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@luxalgo/mcp"
+      ]
+    }
+  }
+}

@@ -13,3 +13,7 @@ package-lock.json
 
 # run artifacts
 runs/
+
+# generated per-machine by scripts/setup.sh (holds absolute paths)
+.mcp.json
+.venv/
