@@ -1159,14 +1159,29 @@ and that string was taken as authoritative. It is not — the client's own sourc
 Any 403, from any cause, is relabelled as a billing problem. **A client's error text describes
 what the client guessed, not what the remote system decided.**
 
-**What is actually true, and what is still unknown.** All three LuxAlgo hosts —
-`mcp.luxalgo.com`, `app.luxalgo.com`, `www.luxalgo.com` — are blocked by the development
-environment's egress policy, so nothing here is conclusive about the live service. Through a
-relay that is *not* blocked, `library_*` still returns 403 while `luxalgo_account` returns a
-distinct sign-in challenge, so the API does distinguish the two cases and the 403 is not simply
-"unauthenticated". The cause — datacenter-IP filtering, bot protection, or a session
-requirement — could not be determined and **should be established on the owner's machine**,
-signed in via `npx -y @luxalgo/mcp login`.
+#### The auth model, which is what the 403 was about
+
+The server is free and keyless **to run**. `library_*` additionally needs an authenticated
+LuxAlgo session — a free account, not a paid plan — and the sign-in is **per machine**:
+
+- `npx -y @luxalgo/mcp login` opens a browser flow and writes a token to a config file
+  (`$XDG_CONFIG_HOME/.config/...`, `%APPDATA%` on Windows).
+- `LUXALGO_MCP_AUTH_FILE` overrides that path — **the hook for unattended runs** (§14.9's
+  screening), where no browser flow is possible.
+- A sign-in on one machine does nothing for a server instance running anywhere else. Each has
+  its own credential store.
+
+That is why every attempt from the development environment failed, and it was never about
+entitlement. Two independent reasons, either sufficient on its own:
+
+1. All three LuxAlgo hosts are egress-blocked there, so a locally-run server cannot reach the
+   API even with a valid token.
+2. The relay path that *is* reachable has no credential store, so it calls unauthenticated —
+   and the API answers 403, which the client relabels as a plan denial.
+
+Confirmed by the tools disagreeing with each other: after the owner signed in successfully,
+`luxalgo_account` from this environment still returned *"Sign in … **from this machine**"*. The
+token existed; it was simply somewhere else.
 
 #### The Library does not need MCP at all
 
@@ -1185,9 +1200,10 @@ authentication, and this is a deliberate feature:
 
 So the design should treat the MCP server as the *convenient* path and the markdown mirror as
 the *reliable* one: MCP gives the agent search and structured lookups; a plain fetch gives it
-the same content with no auth, no key and no server. **§14.9's screening workflow can be built
-against the markdown mirror alone**, which removes the third-party dependency that section was
-carrying.
+the same content with no auth, no key, no server and no per-machine token. **§14.9's screening
+workflow should be built against the markdown mirror**, with MCP as an accelerant when a
+signed-in session is present. That removes both the third-party dependency and the
+per-machine-auth problem from the one workflow that would otherwise run unattended.
 
 #### Attribution is a requirement, not a courtesy
 
