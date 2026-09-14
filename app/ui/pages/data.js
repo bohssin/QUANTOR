@@ -10,6 +10,9 @@ export async function renderData(root) {
   const path = el('input', { class: 'mono', placeholder: '/home/you/data/xau.csv' });
   const timeframe = el('select', {},
     ['M15', 'M1', 'M5', 'M30', 'H1', 'H4', 'D1'].map(t => el('option', { value: t }, t)));
+  const baseTf = el('select', {},
+    el('option', { value: '' }, 'M1 (default)'),
+    ['S1', 'S5', 'S15', 'S30'].map(t => el('option', { value: t }, t)));
   const offset = el('input', { class: 'mono', type: 'number', step: '0.25', value: '0' });
   const contract = el('input', { class: 'mono', type: 'number', value: '100' });
   const tickValue = el('input', { class: 'mono', type: 'number', step: '0.01', value: '0.10' });
@@ -32,7 +35,10 @@ export async function renderData(root) {
           el('label', {}, 'Path on this machine'), path),
         el('div', { class: 'field' }, el('label', {}, 'Timeframe'), timeframe),
         el('div', { class: 'field' },
-          el('label', { title: 'Hours east of UTC. A GMT+3 export is 3.' }, 'GMT offset'), offset)),
+          el('label', { title: 'Hours east of UTC. A GMT+3 export is 3.' }, 'GMT offset'), offset),
+        el('div', { class: 'field' },
+          el('label', { title: 'How fine to cache the bars. S1 lets the engine settle stop-vs-target order inside each bar.' },
+            'Base timeframe'), baseTf)),
       el('div', { class: 'row' },
         el('div', { class: 'field' }, el('label', {}, 'Contract size'), contract),
         el('div', { class: 'field' }, el('label', {}, 'Tick value'), tickValue),
@@ -48,6 +54,7 @@ export async function renderData(root) {
               const out = await api.loadData({
                 name: name.value.trim(), path: path.value.trim(),
                 timeframe: timeframe.value,
+                base_timeframe: baseTf.value,
                 utc_offset_hours: Number(offset.value),
                 contract_size: Number(contract.value),
                 tick_value: Number(tickValue.value),
@@ -61,6 +68,13 @@ export async function renderData(root) {
               renderData(root);
             }, 'Reading'),
           }, 'Load'))),
+      el('div', { class: 'verdict' },
+        el('b', {}, 'Base timeframe: pick S1 for a tick archive'),
+        'This engine fills on bars, so when one signal bar contains both your stop ' +
+        'and your target it cannot say which came first — and assumes the stop. ' +
+        'Caching S1 underneath lets the data decide instead. It costs roughly ' +
+        'sixty times the bars, and it matters most when stops are tight: below ' +
+        '0.4xATR on M1, roughly one trade in twelve is decided by an assumption.'),
       el('div', { class: 'verdict' },
         el('b', {}, 'Large files are streamed'),
         'Above ~256 MB the file is read in bounded memory — peak RSS is set by the ' +

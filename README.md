@@ -52,8 +52,21 @@ UI and the chart are built and tested end to end.
 ## The app
 
 ```bash
-./scripts/run.sh        # then open http://127.0.0.1:8000
+./scripts/run.sh                 # Linux/macOS
+.\scripts\run.ps1                # Windows
 ```
+
+Then open **http://quantor:2026**. For the name to resolve, add one line to
+your hosts file (`C:\Windows\System32\drivers\etc\hosts` on Windows, as
+Administrator; `/etc/hosts` elsewhere):
+
+```
+127.0.0.1   quantor
+```
+
+`http://localhost:2026` is the same thing if you would rather not. It binds
+`0.0.0.0`, so anyone who can reach the machine can drive it — pass
+`--host 127.0.0.1` (or `-BindHost 127.0.0.1`) on an untrusted network.
 
 Four pages and a sidebar, all dark:
 
@@ -71,7 +84,32 @@ Four pages and a sidebar, all dark:
   No API key: it runs on your own subscription.
 
 Large files stream. A 295 MB tick CSV loads in ~24 s at flat memory; bars are
-cached at M1, so every coarser timeframe afterwards is free.
+cached once, so every coarser timeframe afterwards is free.
+
+### Tick data, and S1 bars
+
+There is no tick-mode fill engine. Instead a tick archive is folded into **S1
+bars**, and those settle the one question a single bar cannot answer: when a bar
+contains both your stop and your target, which was hit first? Without finer data
+the engine assumes the stop — safe, and wrong often enough to matter.
+
+Load with **base timeframe S1**, then set **Intrabar fills** to S1 on the run
+panel. Measured: below 0.4xATR stops on M1, about one trade in twelve is decided
+by that assumption, and S1 settled 100% of them — worth +0.08 R of expectancy.
+Above 0.8xATR it barely happens. S1 costs roughly sixty times the bars, so it is
+a deliberate choice rather than the default. See
+[`docs/FINDINGS.md`](docs/FINDINGS.md).
+
+### Windows
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
+.\scripts\run.ps1
+```
+
+Paths are read by the machine running the server, so a path like
+`C:\Users\HP\Documents\Téléchargements MEGA\xau.csv` works when the server runs
+on Windows. Accented directory names are fine — `run.ps1` sets `PYTHONUTF8=1`.
 
 A worked example — hypothesis, rejection, revision, control test and
 walk-forward, with the numbers and the bugs it exposed — is in

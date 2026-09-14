@@ -71,7 +71,8 @@ STRATEGY_GLOBALS: dict[str, Any] = {
 
 def evaluate(signal_block: str, bars: Bars, params: dict[str, Any],
              instrument: Instrument, initial_capital: float = 10_000.0,
-             risk_pct: float = 0.01):
+             risk_pct: float = 0.01, subbars: Bars | None = None,
+             subbar_timeframe: str = "", bar_ms: int = 0):
     """Run a signal block and backtest what it produced. Plan §9.
 
     The block is checked by the AST validator before it is saved, not here —
@@ -103,7 +104,8 @@ def evaluate(signal_block: str, bars: Bars, params: dict[str, Any],
         ) from None
 
     return run_backtest(bars, sig, instrument, initial_capital=initial_capital,
-                        risk_pct=risk_pct)
+                        risk_pct=risk_pct, subbars=subbars,
+                        subbar_timeframe=subbar_timeframe, bar_ms=bar_ms)
 
 
 @dataclass
@@ -130,14 +132,21 @@ class Quantor:
         utc_offset_hours: float = 0.0, contract_size: float = 100.0,
         tick_value: float = 0.10, commission_per_lot_per_side: float = 3.5,
         default_spread: float = 0.30, stream: bool | None = None,
-        progress=None,
+        base_timeframe: str = "", progress=None,
     ) -> dict[str, Any]:
         """Read a CSV, build bars, and register it in the library.
 
-        Large tick files are streamed into **M1** bars regardless of the
-        timeframe asked for, then cached. Every coarser timeframe is derived
-        from that cache in milliseconds, so an 11 GB archive is read once ever
-        rather than once per timeframe anyone becomes curious about (§4.6).
+        Tick files are folded into **base bars** once and cached; every coarser
+        timeframe is then derived from that cache in milliseconds, so a large
+        archive is read once ever rather than once per timeframe anyone becomes
+        curious about (§4.6).
+
+        `base_timeframe` chooses how fine that cache is. M1 is the default and
+        is small. **S1 is the one to pick for a tick archive**: this engine fills
+        on bars, so S1 underneath an M1 strategy is what settles which of the
+        stop and the target was hit first — the question a single M1 bar cannot
+        answer and which the engine otherwise resolves pessimistically. It costs
+        roughly sixty times the bars.
         """
         src = Path(path).expanduser()
         if not src.exists():
@@ -154,7 +163,7 @@ class Quantor:
         if use_stream:
             if not timeframe:
                 timeframe = "M15"
-            base = _finest_base(timeframe)
+            base = _base_for(timeframe, base_timeframe)
             out = stream_bars(src, base, spec, progress=progress)
             bars_dict, quality = out.bars, out.quality
             kind, tick_size, rows, ingest = out.kind, out.tick_size, quality.rows, "stream"
@@ -165,8 +174,8 @@ class Quantor:
                     "a tick source needs a timeframe to build bars from — pass "
                     "e.g. timeframe='M15'"
                 )
-            base = _finest_base(timeframe) if md.kind == "tick" else _name_for_ms(
-                md.resolution_ms)
+            base = (_base_for(timeframe, base_timeframe) if md.kind == "tick"
+                    else _name_for_ms(md.resolution_ms))
             if md.kind == "bar" and timeframe and timeframe_ms(timeframe) < md.resolution_ms:
                 raise ValueError(
                     f"source is {base} bars and cannot serve {timeframe.upper()} — "
@@ -273,6 +282,33 @@ class Quantor:
         self._bars_cache[key] = loaded
         return loaded
 
+    def intrabar_for(self, name: str, signal_timeframe: str,
+                     intrabar: str) -> LoadedBars | None:
+        """The finer series used to settle fills, or None.
+
+        Refuses the two combinations that cannot mean anything: a series coarser
+        than the signal timeframe (it would resolve nothing), and one finer than
+        what the source actually cached (it would have to be invented).
+        """
+        if not intrabar:
+            return None
+        want = intrabar.upper()
+        if want not in TIMEFRAMES or TIMEFRAMES[want] <= 0:
+            raise ValueError(f"unknown intrabar timeframe {intrabar!r}")
+        if timeframe_ms(want) >= timeframe_ms(signal_timeframe):
+            raise ValueError(
+                f"intrabar {want} is not finer than the signal timeframe "
+                f"{signal_timeframe} — it would resolve nothing"
+            )
+        source = self.library.get_data_source(name)
+        assert source is not None
+        if timeframe_ms(want) < timeframe_ms(source.base_timeframe):
+            raise ValueError(
+                f"{name} caches {source.base_timeframe} bars, so {want} would "
+                f"have to be invented. Reload it with base_timeframe='{want}'."
+            )
+        return self.bars_for(name, want)
+
     # --- strategies -------------------------------------------------------
 
     def save_strategy(
@@ -347,9 +383,12 @@ class Quantor:
         self, *, strategy_id: str, data: str, version: int = 0,
         params: dict[str, Any] | None = None, timeframe: str = "",
         initial_capital: float = 10_000.0, risk_pct: float = 0.01,
-        store_artifact: bool = True,
+        store_artifact: bool = True, intrabar: str = "",
     ) -> dict[str, Any]:
+        """Backtest one version. `intrabar` names a finer timeframe (e.g. "S1")
+        whose bars settle stop-versus-target order inside each signal bar."""
         loaded = self.bars_for(data, timeframe)
+        sub = self.intrabar_for(data, loaded.timeframe, intrabar)
         v = self.library.get_version(strategy_id, version)
         merged = {**v.params, **(params or {})}
         source = self.library.get_data_source(data)
@@ -360,8 +399,13 @@ class Quantor:
             timeframe=loaded.timeframe,
         )
         try:
-            result = evaluate(v.signal_block, loaded.bars, merged, loaded.instrument,
-                              initial_capital, risk_pct)
+            result = evaluate(
+                v.signal_block, loaded.bars, merged, loaded.instrument,
+                initial_capital, risk_pct,
+                subbars=sub.bars if sub else None,
+                subbar_timeframe=sub.timeframe if sub else "",
+                bar_ms=timeframe_ms(loaded.timeframe) if sub else 0,
+            )
             m = compute_metrics(result, loaded.timeframe, initial_capital)
         except Exception as exc:
             self.library.finish_run(run_id, status="error",
@@ -396,6 +440,9 @@ class Quantor:
             "ambiguity_rate": round(result.ambiguity_rate(), 4),
             "rejected_zero_lots": result.rejected_zero_lots,
             "ledger_reconciles": bool(reconcile < 1e-6),
+            "intrabar": result.intrabar_timeframe,
+            "resolved_intrabar": result.resolved_intrabar,
+            "intrabar_resolution_rate": round(result.intrabar_resolution_rate(), 4),
             "artifact": artifact,
         }
 
@@ -853,13 +900,23 @@ def _param_spec(param_grid: dict[str, list[float]],
     return ParamSpec(params=params, fixed=fixed)
 
 
-def _finest_base(timeframe: str) -> str:
-    """Cache bars at M1 so any coarser timeframe is free later (§4.6).
+def _base_for(timeframe: str, requested_base: str) -> str:
+    """How fine to cache the bars (§4.6). Rolling up is free; splitting is not.
 
-    Unless the request is finer than M1, in which case cache exactly that —
-    rolling up is always allowed, splitting down never is.
+    An explicit base wins, as long as it is at least as fine as the timeframe
+    that will be run on it — asking to cache H1 and then run M1 is the one
+    combination that cannot work.
     """
     want = timeframe_ms(timeframe) if timeframe else TIMEFRAMES["M1"]
+    if requested_base:
+        base_ms = timeframe_ms(requested_base)
+        if base_ms > want:
+            raise ValueError(
+                f"base_timeframe {requested_base.upper()} is coarser than "
+                f"{timeframe.upper()} and cannot serve it — bars roll up, never "
+                "split (§4.6)"
+            )
+        return requested_base.upper()
     return timeframe.upper() if want < TIMEFRAMES["M1"] else "M1"
 
 

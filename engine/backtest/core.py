@@ -27,7 +27,8 @@ from dataclasses import dataclass
 import numpy as np
 from numba import njit
 
-__all__ = ["Bars", "Instrument", "Signals", "BacktestResult", "run_backtest"]
+__all__ = ["Bars", "Instrument", "Signals", "BacktestResult", "run_backtest",
+           "align_subbars"]
 
 # exit_reason codes
 EXIT_STOP = 1
@@ -108,6 +109,16 @@ class BacktestResult:
     ambiguous_exits: int
     rejected_by_stops_level: int
     rejected_zero_lots: int
+    #: Bars where stop and target were both inside the range and finer bars
+    #: settled which came first. These are no longer guesses.
+    resolved_intrabar: int = 0
+    #: The timeframe those finer bars were, or "" when none were supplied.
+    intrabar_timeframe: str = ""
+
+    def intrabar_resolution_rate(self) -> float:
+        """Share of both-hit bars that finer data actually settled."""
+        both = self.ambiguous_exits + self.resolved_intrabar
+        return self.resolved_intrabar / both if both else 0.0
 
     @property
     def n_trades(self) -> int:
@@ -124,6 +135,7 @@ def _run(
     initial_capital, risk_pct,
     value_per_unit, lot_min, lot_step, lot_max,
     commission, stops_level,
+    have_sub, sub_high, sub_low, sub_start, sub_end,
 ):
     n = b_open.shape[0]
     max_trades = n
@@ -142,6 +154,7 @@ def _run(
     cash = initial_capital
     nt = 0
     ambiguous = 0
+    resolved = 0
     rej_stops = 0
     rej_zero = 0
 
@@ -166,9 +179,37 @@ def _run(
                 hit_tp = b_low[i] <= tp
 
             if hit_sl and hit_tp:
-                ambiguous += 1
-                px = sl                     # conservative: assume the stop
+                # Both levels are inside this bar's range, and a bar does not
+                # say which came first. With finer bars underneath, walk them in
+                # order and let the data answer; without them, assume the stop,
+                # because assuming the target is how a backtest flatters itself.
+                px = sl
                 rsn = EXIT_STOP
+                settled = False
+                if have_sub == 1:
+                    for k in range(sub_start[i], sub_end[i]):
+                        if pos > 0:
+                            s_hit = sub_low[k] <= sl
+                            t_hit = sub_high[k] >= tp
+                        else:
+                            s_hit = sub_high[k] >= sl
+                            t_hit = sub_low[k] <= tp
+                        if s_hit and t_hit:
+                            break          # still ambiguous one level down
+                        if s_hit:
+                            px = sl
+                            rsn = EXIT_STOP
+                            settled = True
+                            break
+                        if t_hit:
+                            px = tp
+                            rsn = EXIT_TARGET
+                            settled = True
+                            break
+                if settled:
+                    resolved += 1
+                else:
+                    ambiguous += 1
             elif hit_sl:
                 px = sl
                 rsn = EXIT_STOP
@@ -269,7 +310,20 @@ def _run(
 
     return (entry_i[:nt], exit_i[:nt], direction[:nt], entry_px[:nt], exit_px[:nt],
             lots_a[:nt], pnl_a[:nt], r_a[:nt], reason[:nt], equity,
-            ambiguous, rej_stops, rej_zero)
+            ambiguous, rej_stops, rej_zero, resolved)
+
+
+def align_subbars(bars: Bars, sub: Bars, bar_ms: int) -> tuple[np.ndarray, np.ndarray]:
+    """For each signal bar, the half-open range of finer bars inside it.
+
+    Both series are sorted by time, so this is two `searchsorted` calls rather
+    than a scan. A signal bar with no finer bars underneath — a gap in the
+    finer source — gets an empty range and falls back to the pessimistic
+    reading, which is the correct behaviour for missing data.
+    """
+    start = np.searchsorted(sub.ms, bars.ms, side="left")
+    end = np.searchsorted(sub.ms, bars.ms + bar_ms, side="left")
+    return start.astype(np.int64), end.astype(np.int64)
 
 
 def run_backtest(
@@ -279,8 +333,22 @@ def run_backtest(
     *,
     initial_capital: float = 10_000.0,
     risk_pct: float = 0.01,
+    subbars: Bars | None = None,
+    subbar_timeframe: str = "",
+    bar_ms: int = 0,
 ) -> BacktestResult:
-    """Run one backtest. Deterministic: same inputs give the same trade list."""
+    """Run one backtest. Deterministic: same inputs give the same trade list.
+
+    `subbars` are finer bars covering the same span — S1 under M1, say. They are
+    used for exactly one thing: deciding which of the stop and the target was
+    touched first when a signal bar's range contains both. Without them the
+    engine assumes the stop, which is safe and often wrong; with them the data
+    decides, and `resolved_intrabar` counts how often it could.
+
+    They do **not** change entries, sizing, or anything else. Signals stay on
+    the signal timeframe: this is a fill-resolution dial (§6), not a way to
+    smuggle finer data into a strategy that claims to trade M1.
+    """
     inst = instrument or Instrument()
     n = len(bars)
     if not (len(signals.long_entry) == len(signals.short_entry) == n):
@@ -288,6 +356,22 @@ def run_backtest(
 
     spread = (bars.spread if bars.spread is not None
               else np.full(n, inst.default_spread, dtype=np.float64))
+
+    have_sub = 0
+    sub_high = np.zeros(1, dtype=np.float64)
+    sub_low = np.zeros(1, dtype=np.float64)
+    sub_start = np.zeros(n, dtype=np.int64)
+    sub_end = np.zeros(n, dtype=np.int64)
+    if subbars is not None and len(subbars) and n:
+        if bar_ms <= 0:
+            raise ValueError(
+                "subbars need bar_ms — the signal timeframe's length in "
+                "milliseconds — to know which finer bars fall inside each bar"
+            )
+        sub_high = np.ascontiguousarray(subbars.high, dtype=np.float64)
+        sub_low = np.ascontiguousarray(subbars.low, dtype=np.float64)
+        sub_start, sub_end = align_subbars(bars, subbars, int(bar_ms))
+        have_sub = 1
 
     out = _run(
         np.ascontiguousarray(bars.open, dtype=np.float64),
@@ -303,6 +387,7 @@ def run_backtest(
         inst.value_per_price_unit(),
         inst.lot_min, inst.lot_step, inst.lot_max,
         inst.commission_per_lot_per_side, inst.stops_level,
+        have_sub, sub_high, sub_low, sub_start, sub_end,
     )
     return BacktestResult(
         entry_i=out[0], exit_i=out[1], direction=out[2], entry_px=out[3],
@@ -310,4 +395,6 @@ def run_backtest(
         exit_reason=out[8], equity=out[9],
         ambiguous_exits=int(out[10]), rejected_by_stops_level=int(out[11]),
         rejected_zero_lots=int(out[12]),
+        resolved_intrabar=int(out[13]),
+        intrabar_timeframe=subbar_timeframe if have_sub else "",
     )

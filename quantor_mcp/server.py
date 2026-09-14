@@ -177,13 +177,14 @@ def data_load(
     tick_value: float = 0.10,
     commission_per_lot_per_side: float = 3.5,
     default_spread: float = 0.30,
+    base_timeframe: str = "",
 ) -> str:
     out = QUANTOR.load_data(
         name=name, path=path, timeframe=timeframe,
         utc_offset_hours=utc_offset_hours, contract_size=contract_size,
         tick_value=tick_value,
         commission_per_lot_per_side=commission_per_lot_per_side,
-        default_spread=default_spread,
+        default_spread=default_spread, base_timeframe=base_timeframe,
     )
     return (
         f"Loaded {name}: {out['rows']:,} {out['kind']} rows -> "
@@ -293,7 +294,10 @@ def strategy_archive(strategy_id: str, reason: str = "", archived: bool = True) 
 
 @server.tool(
     description=(
-        "Run a backtest and return metrics plus a trade summary. This is the only "
+        "Run a backtest and return metrics plus a trade summary. Pass "
+        "intrabar='S1' to settle stop-versus-target order with finer bars "
+        "instead of assuming the stop; the result reports how many bars it "
+        "actually resolved. This is the only "
         "sanctioned way to produce numbers — results from scripts written outside "
         "the engine are not comparable with anything in the library. The run is "
         "recorded with its parameters, data source and equity curve, and the "
@@ -309,10 +313,12 @@ def backtest_run(
     timeframe: str = "",
     initial_capital: float = 10_000.0,
     risk_pct: float = 0.01,
+    intrabar: str = "",
 ) -> str:
     return _json(QUANTOR.backtest(
         strategy_id=strategy_id, data=data, version=version, params=params,
         timeframe=timeframe, initial_capital=initial_capital, risk_pct=risk_pct,
+        intrabar=intrabar,
     ))
 
 

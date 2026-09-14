@@ -22,12 +22,38 @@ from dataclasses import asdict, dataclass
 
 import numpy as np
 
-__all__ = ["Metrics", "compute_metrics", "BARS_PER_YEAR"]
+from engine.store.ingest import TIMEFRAMES
 
-#: Trading bars per year, by timeframe. FX/metals: ~24h x 5d x 52w.
+__all__ = ["Metrics", "compute_metrics", "BARS_PER_YEAR", "bars_per_year"]
+
+#: Trading hours in a year for FX/metals: 258 sessions of 24 hours.
+TRADING_MS_PER_YEAR = 258 * 24 * 3_600_000
+
+#: Bars per year, by timeframe — **derived**, not tabulated.
+#:
+#: It used to be a table of eight entries read with `.get(tf, 6_192.0)`, and
+#: that default is the landmine: every timeframe not in the table — M2, M10,
+#: S1, S30 — silently annualized as if it were H1. On S1 data that is a Sharpe
+#: wrong by a factor of 60, in whichever direction flatters. Deriving it from
+#: the timeframe's own length cannot be wrong for a timeframe nobody thought of,
+#: and `compute_metrics` now raises on a name it does not know rather than
+#: guessing.
+def bars_per_year(timeframe: str) -> float:
+    tf = timeframe.strip().upper()
+    if tf == "W1":
+        return 52.0            # a weekly bar spans the weekend; length lies
+    ms = TIMEFRAMES.get(tf)
+    if not ms:
+        raise ValueError(
+            f"cannot annualize metrics for timeframe {timeframe!r}; known: "
+            + ", ".join(k for k in TIMEFRAMES if k != "TICK")
+        )
+    return TRADING_MS_PER_YEAR / ms
+
+
+#: Kept for callers that want the classic table; every value is derived.
 BARS_PER_YEAR: dict[str, float] = {
-    "M1": 371_520, "M5": 74_304, "M15": 24_768, "M30": 12_384,
-    "H1": 6_192, "H4": 1_548, "D1": 258, "W1": 52,
+    tf: bars_per_year(tf) for tf in TIMEFRAMES if tf != "TICK"
 }
 
 
@@ -77,7 +103,7 @@ def compute_metrics(result, timeframe: str = "M15",
 
     # Per-bar returns off the equity curve, annualized by the bar timeframe.
     rets = np.diff(equity) / np.maximum(equity[:-1], 1e-9)
-    per_year = BARS_PER_YEAR.get(timeframe.upper(), 6_192.0)
+    per_year = bars_per_year(timeframe)
     ann = math.sqrt(per_year)
     mean_ret = float(rets.mean()) if rets.size else 0.0
     std_ret = float(rets.std(ddof=1)) if rets.size > 1 else 0.0

@@ -176,6 +176,10 @@ function runPanel(detail, sources, results) {
       `${s.name} — ${int(s.bars)} ${s.timeframe} bars`)));
   if (sources.length && !state.data) remember({ data: sources[0].name });
 
+  const intrabarSelect = el('select', { id: 'run-intrabar' },
+    el('option', { value: '' }, 'bar close (assume stop)'),
+    ['S1', 'S5', 'S15', 'S30', 'M1'].map(t => el('option', { value: t }, t)));
+
   const tfSelect = el('select', { id: 'run-tf' },
     el('option', { value: '' }, 'source default'),
     ['M1', 'M5', 'M15', 'M30', 'H1', 'H4', 'D1'].map(t =>
@@ -246,6 +250,9 @@ function runPanel(detail, sources, results) {
     el('div', { class: 'row' },
       el('div', { class: 'field' }, el('label', {}, 'Data source'), dataSelect),
       el('div', { class: 'field' }, el('label', {}, 'Timeframe'), tfSelect),
+      el('div', { class: 'field' },
+        el('label', { title: 'Finer bars that settle which of the stop and target was hit first.' },
+          'Intrabar fills'), intrabarSelect),
       el('div', { class: 'field' }, el('label', {}, 'Capital'), capital),
       el('div', { class: 'field' }, el('label', {}, 'Risk % per trade'), risk)),
 
@@ -268,6 +275,7 @@ function runPanel(detail, sources, results) {
         onclick: e => withBusy(e.currentTarget, async () => {
           const out = await api.backtest({
             ...body(), params,
+            intrabar: intrabarSelect.value,
             initial_capital: Number(capital.value),
             risk_pct: Number(risk.value) / 100,
           });
@@ -339,13 +347,25 @@ function showBacktest(host, out, detail) {
     el('div', { class: 'inline dim', style: 'margin-top:12px;font-size:11.5px;font-family:var(--mono)' },
       `${int(out.bars)} bars`, ' · ',
       `ambiguous exits ${out.ambiguous_exits} (${pct(out.ambiguity_rate, 2)})`, ' · ',
+      out.intrabar
+        ? `${int(out.resolved_intrabar)} settled by ${out.intrabar} (${pct(out.intrabar_resolution_rate, 1)})`
+        : 'no intrabar data — ambiguous bars assume the stop',
+      ' · ',
       `rejected for zero lots ${out.rejected_zero_lots}`),
     out.ambiguity_rate > 0.05
       ? el('div', { class: 'verdict warn', style: 'margin-top:10px' },
           el('b', {}, 'High ambiguity rate'),
-          'Many bars touched both the stop and the target, so their order inside ' +
-          'the bar decided the trade. Bar data cannot resolve that — the engine ' +
-          'assumes the worse side. Treat the result as a lower bound.')
+          'Many bars touched both the stop and the target, and a bar does not ' +
+          'record which came first — the engine assumed the stop, so this is a ' +
+          'lower bound. Load the source with an S1 base and set Intrabar fills ' +
+          'to S1 to let the data decide instead.')
+      : null,
+    out.intrabar && out.resolved_intrabar
+      ? el('div', { class: 'verdict good', style: 'margin-top:10px' },
+          el('b', {}, `${int(out.resolved_intrabar)} exits settled by ${out.intrabar} data`),
+          'These were bars whose range held both the stop and the target. The ' +
+          'finer series decided which was touched first, so they are measurements ' +
+          'rather than the pessimistic assumption.')
       : null));
 }
 

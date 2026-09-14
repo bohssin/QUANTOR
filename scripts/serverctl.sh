@@ -12,7 +12,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PIDFILE="${QUANTOR_PIDFILE:-$ROOT/.server.pid}"
 LOG="${QUANTOR_LOG:-$ROOT/.server.log}"
-PORT="${QUANTOR_PORT:-8000}"
+PORT="${QUANTOR_PORT:-2026}"
 HOST="${QUANTOR_HOST:-127.0.0.1}"
 export QUANTOR_LIBRARY="${QUANTOR_LIBRARY:-$ROOT/library}"
 

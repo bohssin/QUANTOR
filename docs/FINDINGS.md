@@ -185,6 +185,63 @@ UI reads.
 
 ---
 
+## S1 bars under an M1 strategy
+
+The engine fills on bars, not ticks. When one signal bar's range contains
+**both** the stop and the target, that bar does not record which was touched
+first, and the engine assumes the stop. Safe, and wrong often enough to matter.
+
+Rather than build tick-mode fills, the tick archive is now folded into **S1
+bars** and those settle the order inside each M1 bar. Measured on 4.3M ticks →
+3,194,397 S1 bars → 146,256 M1 bars:
+
+| stop (×ATR) | trades | ambiguous | rate | settled by S1 |
+|---|---|---|---|---|
+| 0.15 | 940 | 206 | **21.9%** | 219 (100%) |
+| 0.25 | 1,009 | 166 | 16.5% | 174 (100%) |
+| 0.40 | 1,104 | 92 | 8.3% | 97 (100%) |
+| 0.80 | 1,329 | 11 | 0.8% | 11 (100%) |
+| 1.50 | 1,179 | 1 | 0.1% | 1 (100%) |
+
+**Below about 0.4×ATR on M1, roughly one trade in twelve is decided by an
+assumption rather than by data.** Above 0.8×ATR it barely happens. S1 settled
+every single one.
+
+The correction is always in your favour, because the assumption was always the
+pessimistic one:
+
+| stop | rr | ambiguity | expectancy R (M1 only) | expectancy R (+S1) | Δ |
+|---|---|---|---|---|---|
+| 0.20 | 1.0 | 19.2% | −0.7975 | −0.7196 | **+0.078** |
+| 0.20 | 2.0 | 13.7% | −0.6928 | −0.6136 | +0.079 |
+| 0.30 | 1.0 | 13.1% | −0.7303 | −0.6615 | +0.069 |
+| 0.50 | 2.0 | 1.2% | −0.5542 | −0.5490 | +0.005 |
+
+So S1 is worth its cost — about sixty times the bars — exactly when stops are
+tight, and not otherwise.
+
+### But the same run answered a bigger question
+
+Every expectancy in that table is deeply negative, and S1 does not rescue any
+of them. The reason is in the source, not the strategy:
+
+```
+M1 ATR(14) median      0.4532
+spread median          0.1817   = 40% of ATR
+
+stop 0.25xATR -> round-trip cost is 137% of the 1% risked
+stop 0.50xATR ->                     85%
+stop 1.00xATR ->                     48%
+stop 2.00xATR ->                     26%
+```
+
+**At a spread of 40% of the M1 ATR, M1 is not tradeable on this instrument** —
+a 0.25×ATR stop pays more in costs than it puts at risk. That is the finding;
+the fill-resolution question is a rounding error next to it. Which is the right
+order to learn things in, and the platform said so without being asked.
+
+---
+
 ## What is still not true
 
 - **The owner's real 11 GB archive has never been read.** It is a Windows path;

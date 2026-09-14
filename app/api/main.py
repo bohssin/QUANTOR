@@ -52,6 +52,7 @@ class LoadData(BaseModel):
     tick_value: float = 0.10
     commission_per_lot_per_side: float = 3.5
     default_spread: float = 0.30
+    base_timeframe: str = ""
 
 
 class SaveStrategy(BaseModel):
@@ -73,6 +74,7 @@ class Backtest(BaseModel):
     timeframe: str = ""
     initial_capital: float = 10_000.0
     risk_pct: float = 0.01
+    intrabar: str = ""
 
 
 class Optimize(BaseModel):

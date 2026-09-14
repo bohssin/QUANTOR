@@ -67,8 +67,15 @@ _MS_PER_DAY = 86_400_000
 NOMINAL_SUNDAY_OPEN_UTC_HOUR = 22.0
 
 #: MT5 timeframe names -> milliseconds.
+#:
+#: The S* entries are not MT5 timeframes — MT5 has no seconds charts. They exist
+#: because this engine fills on bars, not ticks: a strategy signalling on M1 gets
+#: its stop-versus-target ordering resolved by S1 bars inside each M1 bar, which
+#: is most of what tick-mode fills would buy at a fraction of the cost. See §6.
 TIMEFRAMES: dict[str, int] = {
     "TICK": 0,
+    "S1": 1_000, "S2": 2_000, "S5": 5_000, "S10": 10_000,
+    "S15": 15_000, "S20": 20_000, "S30": 30_000,
     "M1": 60_000, "M2": 120_000, "M3": 180_000, "M4": 240_000, "M5": 300_000,
     "M6": 360_000, "M10": 600_000, "M12": 720_000, "M15": 900_000,
     "M20": 1_200_000, "M30": 1_800_000,

@@ -1,21 +1,30 @@
 #!/usr/bin/env bash
 # Start the QUANTOR app. Plan §15.
 #
-#   ./scripts/run.sh              # http://127.0.0.1:8000
+#   ./scripts/run.sh              # http://quantor:2026
 #   ./scripts/run.sh --port 9000
+#   ./scripts/run.sh --host 127.0.0.1   # loopback only
 #   ./scripts/run.sh --reload     # develop the UI without restarting
 #
-# Bound to 127.0.0.1 on purpose. There is no authentication because there is no
-# remote: this serves one person's own research on their own machine. Do not
-# expose the port.
+# Binds 0.0.0.0:2026 so the machine answers to its own name — open
+# http://quantor:2026 if the host is called `quantor`, or add a hosts entry:
+#
+#   Windows  C:\Windows\System32\drivers\etc\hosts   (edit as Administrator)
+#   Linux    /etc/hosts
+#
+#       127.0.0.1   quantor
+#
+# There is no authentication, because this was built for one person's own
+# research. 0.0.0.0 means anyone who can reach the machine can drive it, so on
+# an untrusted network use `--host 127.0.0.1` instead.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-PORT=8000
-HOST=127.0.0.1
+PORT=2026
+HOST=0.0.0.0
 EXTRA=()
 
 while [[ $# -gt 0 ]]; do
@@ -43,6 +52,11 @@ mkdir -p "$QUANTOR_LIBRARY"
 echo
 echo "  QUANTOR"
 echo "  library : $QUANTOR_LIBRARY"
-echo "  open    : http://$HOST:$PORT"
+if [ "$HOST" = "0.0.0.0" ]; then
+  echo "  open    : http://quantor:$PORT   (or http://localhost:$PORT)"
+  echo "  note    : reachable from your network — use --host 127.0.0.1 to keep it local"
+else
+  echo "  open    : http://$HOST:$PORT"
+fi
 echo
 exec "$ROOT/.venv/bin/uvicorn" app.api.main:app --host "$HOST" --port "$PORT" "${EXTRA[@]}"
