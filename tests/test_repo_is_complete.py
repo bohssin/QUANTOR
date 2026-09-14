@@ -129,3 +129,59 @@ def test_gitignore_anchors_its_directory_patterns():
         f"which can swallow source directories: {risky}. Anchor them with a "
         "leading slash, e.g. `/library/`."
     )
+
+
+# --- Windows packaging ---------------------------------------------------------
+
+def test_powershell_scripts_with_non_ascii_start_with_a_utf8_bom():
+    """PowerShell 5.1 reads a BOM-less .ps1 as ANSI, mangling non-ASCII.
+
+    `powershell.exe` — still the default on Windows — decodes a script without a
+    byte-order mark using the current ANSI code page. An accented character in
+    the file is therefore corrupted at PARSE time, which no amount of
+    `[Console]::OutputEncoding` can undo afterwards. Setting only the output
+    encoding is what shipped first, and the path printed for the user to copy
+    came out as `TÃ©lÃ©chargements`.
+    """
+    bom = b"\xef\xbb\xbf"
+    problems = []
+    for script in ROOT.rglob("*.ps1"):
+        if not _is_shipped(script):
+            continue
+        raw = script.read_bytes()
+        text = raw.decode("utf-8-sig")
+        if any(ord(c) > 127 for c in text) and not raw.startswith(bom):
+            problems.append(str(script.relative_to(ROOT)))
+    assert not problems, (
+        f"these PowerShell scripts contain non-ASCII but have no UTF-8 BOM, so "
+        f"Windows PowerShell will mangle it: {problems}"
+    )
+
+
+def test_the_windows_entry_points_exist_and_call_the_real_scripts():
+    """cmd.exe does not execute .ps1 files; typing one silently does nothing."""
+    for wrapper, target in (("setup.cmd", "setup.ps1"), ("run.cmd", "run.ps1")):
+        path = ROOT / wrapper
+        assert path.exists(), f"{wrapper} is missing — cmd.exe users have no entry point"
+        body = path.read_text()
+        assert target in body, f"{wrapper} does not invoke {target}"
+        assert "ExecutionPolicy Bypass" in body, (
+            f"{wrapper} will be blocked by the default execution policy")
+
+
+def test_nothing_advertises_a_port_the_app_does_not_serve():
+    """The doctor told people to open :8000 for a release after the move to 2026."""
+    from quantor_mcp.doctor import DEFAULT_PORT
+
+    stale = []
+    for path in [ROOT / "quantor_mcp" / "doctor.py", ROOT / "scripts" / "run.sh",
+                 ROOT / "scripts" / "run.ps1", ROOT / "scripts" / "serverctl.sh",
+                 ROOT / "README.md"]:
+        if not path.exists():
+            continue
+        for i, line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), 1):
+            if "8000" in line and str(DEFAULT_PORT) not in line:
+                stale.append(f"{path.relative_to(ROOT)}:{i}: {line.strip()[:70]}")
+    assert not stale, (
+        f"these lines still advertise port 8000; the app serves {DEFAULT_PORT}:\n  "
+        + "\n  ".join(stale))

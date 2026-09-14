@@ -24,6 +24,15 @@ ROOT = Path(__file__).resolve().parents[1]
 REQUIRED = ["mcp", "numpy", "numba", "pyarrow", "pandas"]
 REQUIRED_APP = ["fastapi", "uvicorn"]
 
+#: The port the app serves on. Defined here and read by the closing message so
+#: a change in `scripts/run.*` cannot leave the doctor telling people to open a
+#: port nothing is listening on — which it did, for one release.
+DEFAULT_PORT = 2026
+
+#: Windows has no bash, so `./scripts/run.sh` is not advice, it is a dead end.
+IS_WINDOWS = sys.platform == "win32"
+RUN_COMMAND = "run.cmd" if IS_WINDOWS else "./scripts/run.sh"
+
 GREEN, RED, YELLOW, DIM, RESET = "\033[32m", "\033[31m", "\033[33m", "\033[2m", "\033[0m"
 if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
     GREEN = RED = YELLOW = DIM = RESET = ""
@@ -71,7 +80,7 @@ def check_app_packages() -> bool | None:
         "app packages (optional)", None if missing else True,
         "fastapi + uvicorn present" if not missing else f"missing: {', '.join(missing)}",
         f"{sys.executable} -m pip install fastapi 'uvicorn[standard]'\n"
-        "Only needed for the browser UI (./scripts/run.sh). The agent works "
+        f"Only needed for the browser UI ({RUN_COMMAND}). The agent works "
         "through MCP without them.",
     )
 
@@ -337,7 +346,9 @@ def main() -> int:
     print("  claude --mcp-config .mcp.json \\")
     print('    --allowedTools "mcp__quantor-engine__*,mcp__luxalgo__*,Read,Edit"\n')
     print("Or open the app:\n")
-    print("  ./scripts/run.sh          # then http://127.0.0.1:8000\n")
+    print(f"  {RUN_COMMAND}"
+          f"{' ' * max(1, 24 - len(RUN_COMMAND))}"
+          f"# then http://localhost:{DEFAULT_PORT}\n")
     return 0
 
 

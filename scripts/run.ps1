@@ -1,4 +1,4 @@
-# Start the QUANTOR app on Windows.
+﻿# Start the QUANTOR app on Windows.
 #
 #   .\scripts\run.ps1                      # http://quantor:2026
 #   .\scripts\run.ps1 -Port 9000
@@ -21,6 +21,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Keep the UTF-8 BOM at the top of this file: PowerShell 5.1 reads a BOM-less
+# .ps1 as ANSI, which mangles non-ASCII before anything below can run.
 try {
     [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
     $OutputEncoding = [System.Text.Encoding]::UTF8

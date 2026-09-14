@@ -1,4 +1,4 @@
-# Set up QUANTOR on Windows. PowerShell equivalent of scripts/setup.sh.
+﻿# Set up QUANTOR on Windows. PowerShell equivalent of scripts/setup.sh.
 #
 #   powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
 #
@@ -12,9 +12,12 @@
 
 $ErrorActionPreference = "Stop"
 
-# cmd.exe defaults to a legacy code page, so UTF-8 bytes in this file render as
-# mojibake ("TÃ©lÃ©chargements"). Tell the console what it is receiving, and keep
-# the decorative characters ASCII so it reads correctly even where this fails.
+# This file starts with a UTF-8 BOM, and must keep it. Windows PowerShell 5.1 —
+# which `powershell.exe` still is — reads a BOM-less .ps1 using the current ANSI
+# code page, so the accented path below was already mangled at PARSE time and no
+# output setting could undo it ("TÃ©lÃ©chargements"). The BOM is what tells it the
+# file is UTF-8; the console encoding below is what keeps it that way on the way
+# out. Both are needed, and setting only the second is what shipped first.
 try {
     [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
     $OutputEncoding = [System.Text.Encoding]::UTF8
