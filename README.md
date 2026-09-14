@@ -18,8 +18,8 @@ timeframe, MT5 modeling modes as the fidelity dial, MT5 Strategy Tester layout
 for the UI.
 
 The design document is [`trading-agent-plan.md`](trading-agent-plan.md), and its
-§0 asks you to argue with it. The engine, the MCP server and the validation
-layer are built and tested; the chart and the conversational UI are not.
+§0 asks you to argue with it. The engine, the MCP server, the library, the dark
+UI and the chart are built and tested end to end.
 
 ## What exists
 
@@ -38,12 +38,48 @@ layer are built and tested; the chart and the conversational UI are not.
 | `engine/optimize/plateau.py` | Neighbourhood robustness — plateaus over peaks (§11) |
 | `bench/demo_loop.py` | End-to-end: signal → backtest → optimize → walk-forward |
 | `bench/probe_vectorbt.py` | Reproduces the VectorBT parameter-grid trap (§3.1) |
-| `tests/` | 177 passing |
+| `engine/store/stream.py` | Constant-memory ingest for tick archives of any size |
+| `engine/library/` | SQLite + content-addressed artifacts — everything survives a restart (§16) |
+| `engine/service.py` | One implementation of every operation; MCP and HTTP are adapters over it |
+| `app/api/` | FastAPI backend + the agent WebSocket |
+| `app/ui/` | Dark UI: strategies, chart, data, history, assistant sidebar |
+| `scripts/run.sh` | Start the app |
+| `scripts/drive_ui.py` | Drives the UI in Chromium and fails on any console error |
+| `tests/` | 244 passing |
 | `tools/pinets_oracle/` | Dev-only fixture generator (AGPL, never shipped) |
 | `bench/` | Reproduces every `[measured]` number in the plan |
 
-Not built yet: the chart, the conversational sidebar, and the library/catalogue
-persistence (§16) — strategies currently live in the server process.
+## The app
+
+```bash
+./scripts/run.sh        # then open http://127.0.0.1:8000
+```
+
+Four pages and a sidebar, all dark:
+
+- **Strategies** — the version tree, the signal block, and one panel that runs
+  everything: backtest, grid sweep, walk-forward validation, and the control
+  test. Results land inline and in the library.
+- **Chart** — candles with the run's **own** trade list drawn on them, the
+  equity curve panned in step below, and a trade table that scrolls the chart
+  to any trade. The markers are the engine's trades, never re-derived in the
+  browser, so the picture and the number cannot disagree.
+- **Data** — load a tick or bar CSV, read its quality report, see which
+  timeframes it can serve.
+- **History** — every run ever made, reopenable, including the failed ones.
+- **Assistant** — Claude Code over a WebSocket, driving the same MCP tools.
+  No API key: it runs on your own subscription.
+
+Large files stream. A 295 MB tick CSV loads in ~24 s at flat memory; bars are
+cached at M1, so every coarser timeframe afterwards is free.
+
+### The control test
+
+The cheapest way to tell a real edge from a bug: re-run the strategy on
+**shuffled returns**. Same distribution, same costs, same bar count — the order
+destroyed. An edge that survives that is look-ahead or a sizing artifact, not an
+edge. It is a button in the UI and an MCP tool (`control_test`); run it before
+believing any result.
 
 ## Quick start — run it locally
 
@@ -66,7 +102,8 @@ npx -y @luxalgo/mcp login
 And start a session:
 
 ```bash
-claude --mcp-config .mcp.json   --allowedTools "mcp__quantor-engine__*,mcp__luxalgo__*,Read,Edit"
+claude --mcp-config .mcp.json \
+  --allowedTools "mcp__quantor-engine__*,mcp__luxalgo__*,Read,Edit"
 ```
 
 Ask it to do the loop:

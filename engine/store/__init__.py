@@ -13,11 +13,23 @@ from .ingest import (
     read_tick_csv,
     timeframe_ms,
 )
+from .stream import (
+    BarAccumulator,
+    StreamResult,
+    fingerprint,
+    stream_bars,
+    stream_batches,
+)
 
 __all__ = [
     "TIMEFRAMES",
+    "BarAccumulator",
+    "StreamResult",
     "bars_from_ticks",
     "build_bars",
+    "fingerprint",
+    "stream_bars",
+    "stream_batches",
     "MarketData",
     "QualityReport",
     "SourceSpec",

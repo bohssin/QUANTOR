@@ -19,6 +19,18 @@ Run it:
 
 Register it with Claude Code via `.mcp.json`; see `quantor_mcp/README.md`.
 
+**This file is an adapter, not an implementation.** Every operation lives in
+`engine/service.py`, which the HTTP API calls too. That is deliberate: when the
+agent and the UI each had their own copy, the failure mode was a strategy
+measuring Sharpe 1.4 in one and 0.9 in the other, with no error anywhere and no
+way to tell which was real. One implementation, two adapters, and a test that
+runs the same strategy through both and compares every number.
+
+Results persist. Strategies, versions, runs, metrics and cached bars live in the
+library (§16), so closing the session no longer discards the work — and the
+cumulative comparison count the deflated Sharpe needs (§12) can finally exist,
+since it is a claim about history.
+
 Signal blocks are checked by a static AST validator before execution
 (`engine.signal.validate_signal_block`) and then run in a restricted namespace.
 Two layers with different jobs:
@@ -37,26 +49,16 @@ signal block the owner did not initiate.
 
 from __future__ import annotations
 
+import functools
 import json
+import os
 import sys
-import time
-from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from engine.backtest import Bars, Instrument, Signals, compute_metrics, run_backtest
-from engine.indicators import (
-    atr, atr_fast, ema, ema_fast, rma, rma_fast,
-    rsi, rsi_fast, sma, sma_fast, true_range, true_range_fast,
-)
-from engine.optimize import FloatParam, IntParam, ParamSpec, grid_search
-from engine.signal import validate_signal_block
-from engine.store import build_bars, read_csv
-from engine.validate import rolling_folds, walk_forward
+from engine.service import Quantor
 
 from mcp.server.mcpserver import MCPServer
 
@@ -67,51 +69,14 @@ server = MCPServer(
         "run backtests and sweeps, and render results on the chart. Do NOT write "
         "your own backtest scripts — the engine owns fill semantics, costs and "
         "fold geometry, and results produced outside these tools are not "
-        "comparable with anything in the library."
+        "comparable with anything in the library. Everything you save persists: "
+        "strategies, versions and runs are still here in the next session."
     ),
 )
 
-# --- in-process state (the real build puts this in the library, §16) ---------
-
-DATA: dict[str, dict[str, Any]] = {}
-STRATEGIES: dict[str, list[dict[str, Any]]] = {}
-
-#: Everything a signal block is allowed to see. Plan §9 — enforcement by
-#: namespace, not by prompting.
-STRATEGY_GLOBALS: dict[str, Any] = {
-    "np": np,
-    "sma": sma, "ema": ema, "rma": rma, "rsi": rsi, "atr": atr,
-    "true_range": true_range,
-    "sma_fast": sma_fast, "ema_fast": ema_fast, "rma_fast": rma_fast,
-    "rsi_fast": rsi_fast, "atr_fast": atr_fast, "true_range_fast": true_range_fast,
-    # numba dispatchers import at call time, so __import__ has to be present.
-    # That is precisely why the validator (not this dict) is the enforcement.
-    "__builtins__": {
-        "abs": abs, "min": min, "max": max, "len": len, "range": range,
-        "float": float, "int": int, "bool": bool, "round": round,
-        "sum": sum, "enumerate": enumerate, "zip": zip, "print": print,
-        "__import__": __import__, "isinstance": isinstance, "getattr": getattr,
-        "hasattr": hasattr, "type": type, "tuple": tuple, "list": list,
-        "dict": dict, "set": set, "str": str, "ValueError": ValueError,
-        "TypeError": TypeError, "KeyError": KeyError, "Exception": Exception,
-    },
-}
-
-#: Fallback only. Each loaded source carries its own Instrument built from the
-#: file's detected tick size plus whatever the caller declared — §5 forbids
-#: hardcoding anything that drives sizing or P&L, and a single shared default
-#: silently prices every instrument as if it were the first one loaded.
-DEFAULT_INSTRUMENT = Instrument()
-
-
-@dataclass
-class Version:
-    version: int
-    description: str
-    signal_block: str
-    params: dict[str, Any]
-    parent: int | None
-    created_at: float = field(default_factory=time.time)
+#: One library, shared with the API server through the file. Both processes
+#: write it, which is why the connection opens in WAL mode (see engine/library).
+QUANTOR = Quantor(os.environ.get("QUANTOR_LIBRARY") or None)
 
 
 # --- error surfacing ---------------------------------------------------------
@@ -132,7 +97,6 @@ def surfacing_errors(fn):
     included because "KeyError: 'fast'" tells the agent exactly what to change,
     while "something went wrong" tells it to give up.
     """
-    import functools
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
@@ -154,43 +118,52 @@ _HINTS = {
     "ValueError": "check the arguments against the tool description",
     "IndexError": "an array in the signal block is not the same length as bars",
     "TypeError": "an argument has the wrong type; arrays must be numpy arrays",
+    "FileNotFoundError": "the path is read on the machine running this server",
 }
 
 
-# --- tools -------------------------------------------------------------------
+def _json(obj: Any) -> str:
+    return json.dumps(obj, indent=2, default=str)
+
+
+# --- data --------------------------------------------------------------------
 
 @server.tool(
     description=(
         "List loaded market data sources with their resolution, GMT offset, row "
         "count and quality summary. Call this first — a strategy can only run on "
-        "a timeframe its source is fine enough to serve."
+        "a timeframe its source is fine enough to serve. Sources persist across "
+        "sessions, so what is listed here may have been loaded days ago."
     )
 )
 @surfacing_errors
 def data_list() -> str:
-    if not DATA:
-        return "No data loaded. Use data_load(path) first."
-    rows = []
-    for name, d in DATA.items():
-        inst = d.get("_instrument")
-        rows.append(
-            f"{name}: kind={d['kind']} timeframe={d.get('timeframe')} "
-            f"rows={d.get('rows', 0):,} bars={d['bars']:,} "
-            f"tick_size={d['tick_size']} "
-            f"tick_value={getattr(inst, 'tick_value', '?')} "
-            f"contract_size={getattr(inst, 'contract_size', '?')} span={d['span']}"
+    sources = QUANTOR.list_data()
+    if not sources:
+        return "No data loaded. Use data_load(name, path, timeframe) first."
+    lines = []
+    for d in sources:
+        lines.append(
+            f"{d['name']}: kind={d['kind']} base={d['base_timeframe']} "
+            f"rows={d['rows']:,} bars={d['bars']:,} tick_size={d['tick_size']} "
+            f"gmt{d['utc_offset_hours']:+g} span={d['span']} ({d['span_days']}d) "
+            f"tick_value={d['instrument'].get('tick_value')} "
+            f"contract_size={d['instrument'].get('contract_size')}"
         )
-    return "\n".join(rows)
+        lines.append(f"  serves: {', '.join(d['serves'][:12])}")
+    return "\n".join(lines)
 
 
 @server.tool(
     description=(
-        "Load a tick or bar CSV as a named data source. Columns and price precision "
-        "are detected from the file. A TICK source requires `timeframe` (e.g. 'M15') "
-        "to build bars from; a bar source infers it from the row spacing. "
-        "contract_size / tick_value / commission drive sizing and P&L and cannot be "
-        "detected — pass the real ones for the instrument or the money is wrong. "
-        "Pass utc_offset_hours if the file's clock is not UTC. Returns the quality "
+        "Load a tick or bar CSV as a named data source. Columns and price "
+        "precision are detected from the file. A TICK source requires `timeframe` "
+        "(e.g. 'M15'); bars are cached at M1 so every coarser timeframe is then "
+        "free — a large archive is read once, ever. Files above ~256 MB stream in "
+        "bounded memory automatically. contract_size / tick_value / commission "
+        "drive sizing and P&L and cannot be detected — pass the real ones for the "
+        "instrument or the money is wrong. Pass utc_offset_hours if the file's "
+        "clock is not UTC (e.g. 3.0 for a GMT+3 export). Returns the quality "
         "report — read it, do not assume the file is clean."
     )
 )
@@ -198,51 +171,35 @@ def data_list() -> str:
 def data_load(
     name: str,
     path: str,
-    utc_offset_hours: float = 0.0,
     timeframe: str = "",
+    utc_offset_hours: float = 0.0,
     contract_size: float = 100.0,
     tick_value: float = 0.10,
     commission_per_lot_per_side: float = 3.5,
     default_spread: float = 0.30,
 ) -> str:
-    from engine.store import SourceSpec
-
-    md = read_csv(path, SourceSpec(utc_offset_hours=utc_offset_hours))
-    if md.kind == "tick" and not timeframe:
-        raise ValueError(
-            "a tick source needs a timeframe to build bars from — pass e.g. "
-            "timeframe='M15'"
-        )
-    tf = timeframe or _name_for_resolution(md.resolution_ms)
-    built = build_bars(md, tf)
-
-    bars = Bars(
-        ms=built["ms"], open=built["open"], high=built["high"],
-        low=built["low"], close=built["close"],
-        spread=built["spread"] if built["spread"].any() else None,
-    )
-
-    instrument = Instrument(
-        contract_size=contract_size,
-        tick_size=md.tick_size,                 # detected from the file, §4.2
+    out = QUANTOR.load_data(
+        name=name, path=path, timeframe=timeframe,
+        utc_offset_hours=utc_offset_hours, contract_size=contract_size,
         tick_value=tick_value,
         commission_per_lot_per_side=commission_per_lot_per_side,
         default_spread=default_spread,
     )
-
-    DATA[name] = {
-        "rows": len(md), "bars": len(bars), "kind": md.kind,
-        "timeframe": tf, "resolution_ms": md.resolution_ms,
-        "tick_size": md.tick_size, "_bars": bars, "_instrument": instrument,
-        "span": f"{md.quality.first_ms}..{md.quality.last_ms}",
-    }
     return (
-        f"Loaded {name}: {len(md):,} rows -> {len(bars):,} {tf} bars\n"
-        f"{md.quality.summary()}\n"
-        f"instrument: tick_size={md.tick_size} (detected) tick_value={tick_value} "
-        f"contract_size={contract_size} commission={commission_per_lot_per_side}/lot/side"
+        f"Loaded {name}: {out['rows']:,} {out['kind']} rows -> "
+        f"{out['base_bars']:,} {out['base_timeframe']} bars "
+        f"({out['bars']:,} at {out['timeframe']}) in {out['seconds']}s "
+        f"via {out['ingest']} ingest\n"
+        f"{out['quality_summary']}\n"
+        f"span: {out['span']}\n"
+        f"instrument: tick_size={out['tick_size']} (detected) "
+        f"tick_value={tick_value} contract_size={contract_size} "
+        f"commission={commission_per_lot_per_side}/lot/side\n"
+        f"Cached — any timeframe from {out['base_timeframe']} upward is now free."
     )
 
+
+# --- strategies --------------------------------------------------------------
 
 @server.tool(
     description=(
@@ -250,8 +207,12 @@ def data_load(
         "signal(bars, p) -> dict with keys long_entry, short_entry, "
         "stop_distance, target_distance (all numpy arrays aligned to bars). "
         "It may use np and the indicator functions; it must not place orders, "
-        "hold position state, or index bars forward. Returns the new version "
-        "number; nothing is ever overwritten."
+        "hold position state, or index bars forward. Nothing is ever "
+        "overwritten — versions form a tree, and `parent_version` branches from "
+        "an older one. Set `family` to the same value across variants of one "
+        "idea so their comparison counts accumulate for the deflated Sharpe. "
+        "Set `source_url` when the idea came from the LuxAlgo Library — its "
+        "licence is free WITH attribution."
     )
 )
 @surfacing_errors
@@ -260,53 +221,83 @@ def strategy_save(
     description: str,
     signal_block: str,
     params: dict[str, Any] | None = None,
+    parent_version: int | None = None,
+    family: str = "",
+    source_url: str = "",
+    origin: str = "agent",
 ) -> str:
-    result = validate_signal_block(signal_block)          # §9, before anything runs
-    result.raise_if_invalid()
-    versions = STRATEGIES.setdefault(strategy_id, [])
-    v = Version(
-        version=len(versions) + 1,
-        description=description,
-        signal_block=signal_block,
-        params=params or {},
-        parent=len(versions) or None,
+    out = QUANTOR.save_strategy(
+        strategy_id=strategy_id, description=description,
+        signal_block=signal_block, params=params, parent_version=parent_version,
+        family=family, source_url=source_url, origin=origin,
     )
-    versions.append(asdict(v))
-    msg = f"Saved {strategy_id} v{v.version} (parent: {v.parent})"
-    if result.warnings:
-        msg += "\nwarnings:\n  - " + "\n  - ".join(result.warnings)
+    msg = (f"Saved {strategy_id} v{out['version']} "
+           f"(parent: {out['parent_version']}, family: {out['family']})")
+    if out["warnings"]:
+        msg += "\nwarnings:\n  - " + "\n  - ".join(out["warnings"])
     return msg
 
 
-@server.tool(description="List strategies and their versions, newest first.")
+@server.tool(
+    description=(
+        "List strategies, newest activity first, with version and run counts and "
+        "the cumulative comparison count for each family. Add include_archived to "
+        "see rejected ones — they are kept, never deleted, because 'we tried this "
+        "and it failed walk-forward' is a result."
+    )
+)
 @surfacing_errors
-def strategy_list() -> str:
-    if not STRATEGIES:
+def strategy_list(include_archived: bool = False) -> str:
+    rows = QUANTOR.list_strategies(include_archived=include_archived)
+    if not rows:
         return "No strategies saved."
     out = []
-    for sid, versions in STRATEGIES.items():
-        out.append(f"{sid}: {len(versions)} version(s)")
-        for v in reversed(versions[-3:]):
-            out.append(f"  v{v['version']}  {v['description'][:70]}")
+    for s in rows:
+        flag = "  [archived]" if s["archived"] else ""
+        out.append(
+            f"{s['strategy_id']}{flag}: {s['versions']} version(s), "
+            f"{s['runs']} run(s), family={s['family']}, "
+            f"{s['comparisons']:,} cumulative comparisons"
+        )
+        out.append(f"  v{s['latest']['version']}  {s['latest']['description'][:70]}")
+        if s["archived"] and s["archived_reason"]:
+            out.append(f"  reason: {s['archived_reason']}")
     return "\n".join(out)
 
 
-@server.tool(description="Fetch one strategy version's source and parameters.")
+@server.tool(
+    description=("Fetch one strategy version's source, parameters and lineage. "
+                 "version=0 means the latest.")
+)
 @surfacing_errors
 def strategy_get(strategy_id: str, version: int = 0) -> str:
-    v = _version(strategy_id, version)
-    return json.dumps(
-        {"version": v["version"], "description": v["description"],
-         "params": v["params"], "signal_block": v["signal_block"]},
-        indent=2,
-    )
+    return _json(QUANTOR.get_strategy(strategy_id, version))
 
+
+@server.tool(
+    description=(
+        "Archive a strategy with a reason, or restore it with archived=false. "
+        "Archiving hides it from the default list and deletes nothing: its runs, "
+        "metrics and the reason it was rejected stay queryable. Record why — a "
+        "rejection without a reason gets re-tried in three months."
+    )
+)
+@surfacing_errors
+def strategy_archive(strategy_id: str, reason: str = "", archived: bool = True) -> str:
+    out = QUANTOR.archive_strategy(strategy_id, reason, archived)
+    verb = "Archived" if archived else "Restored"
+    return f"{verb} {strategy_id}" + (f": {reason}" if reason else "")
+
+
+# --- runs --------------------------------------------------------------------
 
 @server.tool(
     description=(
         "Run a backtest and return metrics plus a trade summary. This is the only "
         "sanctioned way to produce numbers — results from scripts written outside "
-        "the engine are not comparable with anything in the library."
+        "the engine are not comparable with anything in the library. The run is "
+        "recorded with its parameters, data source and equity curve, and the "
+        "run_id it returns can be reopened later."
     )
 )
 @surfacing_errors
@@ -319,36 +310,20 @@ def backtest_run(
     initial_capital: float = 10_000.0,
     risk_pct: float = 0.01,
 ) -> str:
-    bars = _bars(data)
-    inst = _instrument(data)
-    tf = _timeframe(data, timeframe)
-    v = _version(strategy_id, version)
-    merged = {**v["params"], **(params or {})}
-
-    result = _evaluate(v["signal_block"], bars, merged, inst,
-                       initial_capital, risk_pct)
-    m = compute_metrics(result, tf, initial_capital)
-
-    reconcile = abs(result.equity[-1] - initial_capital - float(result.pnl.sum()))
-    return json.dumps({
-        "strategy": f"{strategy_id} v{v['version']}",
-        "timeframe": tf,
-        "params": merged,
-        "metrics": {k: (None if isinstance(val, float) and not np.isfinite(val) else val)
-                    for k, val in m.as_dict().items()},
-        "ambiguous_exits": result.ambiguous_exits,
-        "ambiguity_rate": round(result.ambiguity_rate(), 4),
-        "rejected_zero_lots": result.rejected_zero_lots,
-        "ledger_reconciles": bool(reconcile < 1e-6),
-    }, indent=2)
+    return _json(QUANTOR.backtest(
+        strategy_id=strategy_id, data=data, version=version, params=params,
+        timeframe=timeframe, initial_capital=initial_capital, risk_pct=risk_pct,
+    ))
 
 
 @server.tool(
     description=(
         "Grid-sweep parameters. `param_grid` maps name -> [low, high, step] for "
-        "ints or floats. Returns the top results and the comparison count, which "
-        "the deflated Sharpe ratio needs — it accumulates across every sweep of a "
-        "strategy family, not per run."
+        "ints or floats. Returns the top results, a plateau verdict on the winner "
+        "(a sharp optimum surrounded by bad neighbours is a fitting artifact, not "
+        "an edge), and the comparison count — which accumulates across every "
+        "sweep of a strategy family, because that total is what the deflated "
+        "Sharpe ratio divides by."
     )
 )
 @surfacing_errors
@@ -363,49 +338,19 @@ def optimize_run(
     timeframe: str = "",
     top_k: int = 10,
 ) -> str:
-    bars = _bars(data)
-    inst = _instrument(data)
-    tf = _timeframe(data, timeframe)
-    v = _version(strategy_id, version)
-
-    params: dict[str, Any] = {}
-    for name, (lo, hi, step) in param_grid.items():
-        if float(lo).is_integer() and float(hi).is_integer() and float(step).is_integer():
-            params[name] = IntParam(int(lo), int(hi), int(step))
-        else:
-            params[name] = FloatParam(float(lo), float(hi), float(step))
-    spec = ParamSpec(params=params, fixed={**v["params"], **(fixed or {})})
-
-    t0 = time.perf_counter()
-    res = grid_search(
-        spec,
-        lambda p: compute_metrics(_evaluate(v["signal_block"], bars, p, inst), tf),
-        objective=objective, min_trades=min_trades,
-    )
-    elapsed = time.perf_counter() - t0
-
-    return json.dumps({
-        "strategy": f"{strategy_id} v{v['version']}",
-        "timeframe": tf,
-        "objective": objective,
-        "comparisons": res.comparisons,
-        "seconds": round(elapsed, 2),
-        "note": "comparisons accumulate across the family for DSR (plan §11)",
-        "top": [
-            {"params": e.params, "score": None if not np.isfinite(e.score) else round(e.score, 4),
-             "net_profit": round(e.metrics["net_profit"], 2),
-             "max_drawdown": round(e.metrics["max_drawdown"], 2),
-             "n_trades": e.metrics["n_trades"]}
-            for e in res.top_k(top_k)
-        ],
-    }, indent=2)
+    return _json(QUANTOR.optimize(
+        strategy_id=strategy_id, data=data, param_grid=param_grid, version=version,
+        fixed=fixed, objective=objective, min_trades=min_trades,
+        timeframe=timeframe, top_k=top_k,
+    ))
 
 
 @server.tool(
     description=(
         "Walk-forward validation: a full parameter search inside each train fold, "
         "and each winner scored once out-of-sample. Efficiency near 1.0 means the "
-        "optimization generalized; far below means the train folds were fitted."
+        "optimization generalized; far below means the train folds were fitted. "
+        "Returns a plain-words verdict alongside the number."
     )
 )
 @surfacing_errors
@@ -417,161 +362,106 @@ def validate_run(
     train: int = 12_000,
     test: int = 4_000,
     timeframe: str = "",
+    min_trades: int = 10,
 ) -> str:
-    bars = _bars(data)
-    inst = _instrument(data)
-    tf = _timeframe(data, timeframe)
-    v = _version(strategy_id, version)
-    folds = rolling_folds(len(bars), train=train, test=test, step=test)
-    if not folds:
-        return json.dumps({"error": f"not enough bars ({len(bars):,}) for "
-                                    f"train={train} test={test}"})
+    return _json(QUANTOR.validate(
+        strategy_id=strategy_id, data=data, param_grid=param_grid, version=version,
+        train=train, test=test, timeframe=timeframe, min_trades=min_trades,
+    ))
 
-    params: dict[str, Any] = {}
-    for name, (lo, hi, step) in param_grid.items():
-        if float(lo).is_integer() and float(hi).is_integer() and float(step).is_integer():
-            params[name] = IntParam(int(lo), int(hi), int(step))
-        else:
-            params[name] = FloatParam(float(lo), float(hi), float(step))
-    spec = ParamSpec(params=params, fixed=v["params"])
 
-    def search(idx, a, b):
-        w = bars.slice(a, b)
-        r = grid_search(spec,
-                        lambda p: compute_metrics(_evaluate(v["signal_block"], w, p, inst), tf),
-                        min_trades=10)
-        return r.best.params, r.best.score, r.comparisons
-
-    def test_fold(p, a, b):
-        w = bars.slice(a, b)
-        m = compute_metrics(_evaluate(v["signal_block"], w, p, inst), tf)
-        score = m.net_profit / m.max_drawdown if m.max_drawdown > 0 else float("-inf")
-        return score, m.as_dict()
-
-    wf = walk_forward(folds, search, test_fold)
-    eff = wf.efficiency()
-    return json.dumps({
-        "strategy": f"{strategy_id} v{v['version']}",
-        "timeframe": tf,
-        "folds": len(folds),
-        "total_comparisons": wf.total_comparisons,
-        "mean_oos_score": None if not np.isfinite(wf.mean_test_score) else round(wf.mean_test_score, 4),
-        "walk_forward_efficiency": None if not np.isfinite(eff) else round(eff, 3),
-        "per_fold": [
-            {"fold": i, "params": wf.chosen_params[i],
-             "train": None if not np.isfinite(wf.train_scores[i]) else round(wf.train_scores[i], 3),
-             "test": None if not np.isfinite(wf.test_scores[i]) else round(wf.test_scores[i], 3),
-             "trades": wf.test_metrics[i].get("n_trades", 0)}
-            for i in range(len(folds))
-        ],
-    }, indent=2)
+@server.tool(
+    description=(
+        "Re-run a strategy on SHUFFLED returns and compare. The cheapest test "
+        "for whether an edge is real: shuffling bar-to-bar returns keeps the "
+        "distribution and destroys the order, which is the only thing a "
+        "strategy can read. An edge that survives the shuffle is look-ahead or "
+        "a sizing artifact, not an edge. Run this before believing any result."
+    )
+)
+@surfacing_errors
+def control_test(
+    strategy_id: str,
+    data: str,
+    version: int = 0,
+    params: dict[str, Any] | None = None,
+    timeframe: str = "",
+    trials: int = 5,
+    seed: int = 0,
+) -> str:
+    return _json(QUANTOR.control_test(
+        strategy_id=strategy_id, data=data, version=version, params=params,
+        timeframe=timeframe, trials=trials, seed=seed,
+    ))
 
 
 @server.tool(
     description=(
         "Render a run's own entries, exits and stops for the chart. This draws the "
-        "engine's actual trade list, so what is shown is exactly what was measured."
+        "engine's actual trade list, so what is shown is exactly what was "
+        "measured. Returns bars, markers, the equity curve and the metrics for "
+        "the same window; the UI reads the identical payload."
     )
 )
 @surfacing_errors
 def chart_apply(
-    strategy_id: str,
     data: str,
+    strategy_id: str = "",
     version: int = 0,
     params: dict[str, Any] | None = None,
-    max_markers: int = 500,
+    timeframe: str = "",
+    limit: int = 1_000,
+    max_markers: int = 200,
 ) -> str:
-    bars = _bars(data)
-    v = _version(strategy_id, version)
-    r = _evaluate(v["signal_block"], bars, {**v["params"], **(params or {})},
-                  _instrument(data))
-    n = min(r.n_trades, max_markers)
-    return json.dumps({
-        "strategy": f"{strategy_id} v{v['version']}",
-        "trades": r.n_trades,
-        "shown": n,
-        "markers": [
-            {"entry_ms": int(bars.ms[r.entry_i[k]]), "exit_ms": int(bars.ms[r.exit_i[k]]),
-             "side": "long" if r.direction[k] > 0 else "short",
-             "entry": round(float(r.entry_px[k]), 5), "exit": round(float(r.exit_px[k]), 5),
-             "pnl": round(float(r.pnl[k]), 2)}
-            for k in range(n)
-        ],
-    }, indent=2)
+    out = QUANTOR.chart(
+        data=data, strategy_id=strategy_id, version=version, params=params,
+        timeframe=timeframe, limit=limit, max_markers=max_markers,
+    )
+    # The full bar series is for the browser; the agent wants the summary and
+    # the trades, and shipping 4,000 OHLC rows into a transcript helps nobody.
+    out.pop("bars", None)
+    out.pop("equity", None)
+    out.pop("markers", None)
+    out["trades"] = out.get("trades", [])[:max_markers]
+    return _json(out)
 
 
-# --- internals ---------------------------------------------------------------
-
-def _bars(name: str) -> Bars:
-    return _source(name)["_bars"]
-
-
-def _source(name: str) -> dict[str, Any]:
-    if name not in DATA:
-        raise ValueError(f"unknown data source {name!r}; loaded: {list(DATA) or 'none'}")
-    return DATA[name]
-
-
-def _instrument(name: str) -> Instrument:
-    """The source's own instrument, never a shared default (§5)."""
-    return _source(name).get("_instrument", DEFAULT_INSTRUMENT)
+@server.tool(
+    description=(
+        "Past runs, newest first — backtests, sweeps and validations with their "
+        "parameters, metrics and status. Filter by strategy_id or kind. This is "
+        "the record of what was actually tried, and it survives restarts."
+    )
+)
+@surfacing_errors
+def run_history(strategy_id: str = "", kind: str = "", limit: int = 25) -> str:
+    rows = QUANTOR.run_history(strategy_id=strategy_id, kind=kind, limit=limit)
+    if not rows:
+        return "No runs recorded yet."
+    return _json(rows)
 
 
-def _timeframe(name: str, override: str) -> str:
-    """The source knows its own timeframe; an override is for deliberate cases.
-
-    This is not cosmetic. `compute_metrics` annualizes Sharpe and Sortino from
-    bars-per-year, so a caller guessing M15 on H1 data reports a Sharpe wrong by
-    a factor of two, silently and in the flattering direction as often as not.
-    """
-    return override or _source(name).get("timeframe") or "M15"
-
-
-def _name_for_resolution(ms: int) -> str:
-    from engine.store import TIMEFRAMES
-    for name, value in TIMEFRAMES.items():
-        if value == ms:
-            return name
-    return "M15"
+@server.tool(
+    description=(
+        "Reopen one run by id: its parameters, metrics, and the full result table "
+        "for a sweep or the per-fold detail for a validation."
+    )
+)
+@surfacing_errors
+def run_get(run_id: int) -> str:
+    out = QUANTOR.get_run(run_id)
+    if out is None:
+        raise ValueError(f"no run {run_id}; use run_history to list them")
+    return _json(out)
 
 
-def _version(strategy_id: str, version: int) -> dict[str, Any]:
-    versions = STRATEGIES.get(strategy_id)
-    if not versions:
-        raise ValueError(f"unknown strategy {strategy_id!r}; saved: {list(STRATEGIES) or 'none'}")
-    if version in (0, -1):
-        return versions[-1]
-    if not 1 <= version <= len(versions):
-        raise ValueError(f"{strategy_id} has versions 1..{len(versions)}, asked for {version}")
-    return versions[version - 1]
-
-
-def _evaluate(signal_block: str, bars: Bars, params: dict[str, Any],
-              instrument: Instrument | None = None,
-              initial_capital: float = 10_000.0, risk_pct: float = 0.01):
-    """Execute a signal block in the restricted namespace and backtest it."""
-    ns: dict[str, Any] = dict(STRATEGY_GLOBALS)
-    exec(compile(signal_block, "<signal_block>", "exec"), ns)
-    fn = ns.get("signal")
-    if fn is None:
-        raise ValueError("signal block must define signal(bars, p)")
-
-    out = fn(bars, params)
-    try:
-        sig = Signals(
-            long_entry=np.asarray(out["long_entry"], dtype=bool),
-            short_entry=np.asarray(out["short_entry"], dtype=bool),
-            stop_distance=np.asarray(out["stop_distance"], dtype=np.float64),
-            target_distance=np.asarray(out["target_distance"], dtype=np.float64),
-        )
-    except KeyError as exc:
-        raise ValueError(
-            f"signal() must return a dict with long_entry, short_entry, "
-            f"stop_distance, target_distance — missing {exc}"
-        ) from None
-
-    return run_backtest(bars, sig, instrument or DEFAULT_INSTRUMENT,
-                        initial_capital=initial_capital, risk_pct=risk_pct)
+@server.tool(
+    description=("What the library holds: data sources, strategies, versions, "
+                 "runs and artifacts, with where it lives on disk.")
+)
+@surfacing_errors
+def library_stats() -> str:
+    return _json(QUANTOR.stats())
 
 
 if __name__ == "__main__":

@@ -20,6 +20,14 @@ Near 1.0 means a plateau: the neighbours are as good as the peak. Near 0 or
 negative means an isolated spike. The neighbourhood is the grid-adjacent
 configurations — one step in each parameter — so it costs nothing extra when the
 sweep was a grid, the points are already evaluated.
+
+**The ratio is only defined for a positive peak.** Divide by a negative score and
+the scale inverts: a peak of -0.91 with neighbours averaging -0.96 gives 1.06,
+which reads as the flattest possible plateau while actually describing a
+configuration that loses money and whose neighbours lose more. So a non-positive
+peak is reported as unscored, with the neighbour statistics kept — there is
+nothing to be robust about at a setting that does not make money in the first
+place, and saying so is more useful than a number pointing the wrong way.
 """
 
 from __future__ import annotations
@@ -50,6 +58,9 @@ class PlateauReport:
         return self.robustness >= 0.7
 
     def verdict(self) -> str:
+        if math.isfinite(self.score) and self.score <= 0:
+            return ("unscored — the best configuration is not profitable, so "
+                    "there is no peak to be robust around")
         if not math.isfinite(self.robustness):
             return "unscored (peak score is zero or non-finite)"
         if self.n_neighbours == 0:
@@ -88,7 +99,7 @@ def analyze_plateau(evaluations, target: dict, *,
         if k in by_key and math.isfinite(by_key[k])
     ]
 
-    if not neighbour_scores or not math.isfinite(score) or score == 0:
+    if not neighbour_scores or not math.isfinite(score):
         return PlateauReport(target, score, len(neighbour_scores),
                              float("nan"), float("nan"), float("nan"), float("nan"))
 
@@ -100,7 +111,9 @@ def analyze_plateau(evaluations, target: dict, *,
         neighbour_mean=float(arr.mean()),
         neighbour_min=float(arr.min()),
         neighbour_std=float(arr.std(ddof=1)) if arr.size > 1 else 0.0,
-        robustness=float(arr.mean() / score),
+        # Undefined at or below zero — see the module docstring. The neighbour
+        # statistics above stay populated because they are still readable.
+        robustness=float(arr.mean() / score) if score > 0 else float("nan"),
     )
 
 

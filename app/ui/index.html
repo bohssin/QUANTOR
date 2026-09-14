@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QUANTOR</title>
+<link rel="stylesheet" href="/styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%230b0e14'/><path d='M7 22 L12 13 L17 18 L25 8' stroke='%234f8ff7' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>">
+</head>
+<body>
+
+<div class="shell">
+
+  <!-- ---------- left rail ---------- -->
+  <nav class="rail">
+    <div class="brand">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7"/><path d="M7 22 L12 13 L17 18 L25 8"/></svg>
+      <span>QUANTOR</span>
+    </div>
+
+    <a class="rail-link" href="#/strategies" data-route="strategies">
+      <svg viewBox="0 0 20 20"><path d="M3 16V4m0 12h14M6 13V8m4 5V5m4 8v-3"/></svg>
+      <span>Strategies</span>
+    </a>
+    <a class="rail-link" href="#/chart" data-route="chart">
+      <svg viewBox="0 0 20 20"><path d="M3 17h14M6 13V7m0-3v2m0 9v2M11 15V5m0-2v1m0 13v1M16 11V8m0-3v2m0 6v2"/></svg>
+      <span>Chart</span>
+    </a>
+    <a class="rail-link" href="#/data" data-route="data">
+      <svg viewBox="0 0 20 20"><ellipse cx="10" cy="5" rx="6.5" ry="2.5"/><path d="M3.5 5v10c0 1.4 2.9 2.5 6.5 2.5s6.5-1.1 6.5-2.5V5M3.5 10c0 1.4 2.9 2.5 6.5 2.5s6.5-1.1 6.5-2.5"/></svg>
+      <span>Data</span>
+    </a>
+    <a class="rail-link" href="#/history" data-route="history">
+      <svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="7"/><path d="M10 6v4l2.5 2"/></svg>
+      <span>History</span>
+    </a>
+
+    <div class="rail-foot">
+      <div class="stat-line" id="rail-stats">&nbsp;</div>
+      <button class="ghost" id="toggle-agent" title="Toggle the assistant panel">
+        <svg viewBox="0 0 20 20"><path d="M3 5h14v9H8l-4 3v-3H3z"/></svg>
+        <span>Assistant</span>
+      </button>
+    </div>
+  </nav>
+
+  <!-- ---------- main ---------- -->
+  <main class="main" id="main">
+    <div class="loading">Loading…</div>
+  </main>
+
+  <!-- ---------- agent sidebar ---------- -->
+  <aside class="agent" id="agent">
+    <header class="agent-head">
+      <div>
+        <strong>Assistant</strong>
+        <span class="pill" id="agent-state">idle</span>
+      </div>
+      <button class="icon" id="agent-clear" title="Clear the conversation">
+        <svg viewBox="0 0 20 20"><path d="M4 6h12M8 6V4h4v2m-6 0v9h8V6"/></svg>
+      </button>
+    </header>
+
+    <div class="agent-log" id="agent-log">
+      <div class="agent-hint">
+        <p>Ask for research and it drives the same engine the buttons do — every
+           strategy it saves and every run it makes lands in your library.</p>
+        <div class="chips">
+          <button class="chip">What data and strategies do I have?</button>
+          <button class="chip">Build a mean-reversion strategy on xau and backtest it</button>
+          <button class="chip">Optimize my best strategy, then walk-forward it</button>
+          <button class="chip">Search the LuxAlgo library for breakout concepts</button>
+        </div>
+      </div>
+    </div>
+
+    <form class="agent-input" id="agent-form">
+      <textarea id="agent-text" rows="2" placeholder="Ask the assistant…  (Enter to send, Shift+Enter for a newline)"></textarea>
+      <button type="submit" id="agent-send" title="Send">
+        <svg viewBox="0 0 20 20"><path d="M3 10 17 3l-4 14-3-6z"/></svg>
+      </button>
+    </form>
+  </aside>
+
+</div>
+
+<div class="toasts" id="toasts"></div>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>

@@ -53,7 +53,7 @@ def _seeded(x, alpha, length):
 
 
 @njit(cache=True, fastmath=False)
-def sma_fast(x, length):
+def _sma_fast_kernel(x, length):
     n = x.shape[0]
     out = np.full(n, np.nan)
     if n < length:
@@ -71,17 +71,17 @@ def sma_fast(x, length):
 
 
 @njit(cache=True, fastmath=False)
-def ema_fast(x, length):
+def _ema_fast_kernel(x, length):
     return _seeded(x, 2.0 / (length + 1.0), length)
 
 
 @njit(cache=True, fastmath=False)
-def rma_fast(x, length):
+def _rma_fast_kernel(x, length):
     return _seeded(x, 1.0 / length, length)
 
 
 @njit(cache=True, fastmath=False)
-def rsi_fast(x, length):
+def _rsi_fast_kernel(x, length):
     n = x.shape[0]
     out = np.full(n, np.nan)
     if n < 2:
@@ -110,7 +110,7 @@ def rsi_fast(x, length):
 
 
 @njit(cache=True, fastmath=False)
-def true_range_fast(high, low, close):
+def _true_range_fast_kernel(high, low, close):
     n = high.shape[0]
     out = np.empty(n)
     if n == 0:
@@ -126,5 +126,63 @@ def true_range_fast(high, low, close):
 
 
 @njit(cache=True, fastmath=False)
+def _atr_fast_kernel(high, low, close, length):
+    return _seeded(_true_range_fast_kernel(high, low, close), 1.0 / length, length)
+
+
+# --- the public surface ------------------------------------------------------
+
+def _period(length, name: str) -> int:
+    """A period is a count of bars, so it is an integer or it is a mistake.
+
+    Without this, a sweep that produced `atr=38.4` — which the UI's generated
+    grid did, by scaling a default of 24 by 1.6 — reached numba and came back as
+    a forty-line `TypingError: No implementation of function
+    Function(<built-in function setitem>)`. That message is unactionable to
+    everyone, and the actual problem was one bound with a decimal point in it.
+    """
+    try:
+        value = int(length)
+    except (TypeError, ValueError):
+        raise TypeError(
+            f"{name} period must be a whole number of bars, got {length!r}"
+        ) from None
+    if value != length:
+        raise ValueError(
+            f"{name} period must be a whole number of bars, got {length!r}. "
+            f"A parameter grid that steps through {name} has to use integer "
+            f"bounds and an integer step."
+        )
+    if value < 1:
+        raise ValueError(f"{name} period must be at least 1, got {value}")
+    return value
+
+
+def sma_fast(x, length):
+    """Simple moving average."""
+    return _sma_fast_kernel(x, _period(length, "sma"))
+
+
+def ema_fast(x, length):
+    """Exponential moving average, Pine-seeded."""
+    return _ema_fast_kernel(x, _period(length, "ema"))
+
+
+def rma_fast(x, length):
+    """Wilder's smoothing."""
+    return _rma_fast_kernel(x, _period(length, "rma"))
+
+
+def rsi_fast(x, length):
+    """Wilder's RSI."""
+    return _rsi_fast_kernel(x, _period(length, "rsi"))
+
+
+def true_range_fast(high, low, close):
+    """True range. No period to get wrong."""
+    return _true_range_fast_kernel(high, low, close)
+
+
 def atr_fast(high, low, close, length):
-    return _seeded(true_range_fast(high, low, close), 1.0 / length, length)
+    """Average true range, Wilder-smoothed."""
+    return _atr_fast_kernel(high, low, close, _period(length, "atr"))

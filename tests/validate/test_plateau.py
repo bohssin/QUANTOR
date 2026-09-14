@@ -103,3 +103,39 @@ def test_a_zero_score_peak_is_unscored_not_a_crash():
 def test_empty_evaluations_raise():
     with pytest.raises(ValueError, match="no evaluations"):
         analyze_plateau([], {"a": 1})
+
+
+# --- a negative peak has no plateau ------------------------------------------
+
+def test_a_losing_peak_is_unscored_rather_than_reported_as_flat():
+    """mean/peak inverts below zero: -0.96 / -0.91 = 1.06, the flattest score
+    there is, describing a setting that loses money surrounded by worse ones."""
+    evals = [
+        ev(-0.98, fast=5),
+        ev(-0.91, fast=10),      # the "best" — still a loss
+        ev(-0.95, fast=15),
+    ]
+    report = analyze_plateau(evals, {"fast": 10})
+
+    assert math.isnan(report.robustness), "a negative peak cannot have a ratio"
+    assert not report.is_plateau
+    assert "not profitable" in report.verdict()
+    # The neighbour statistics are still worth reading.
+    assert report.n_neighbours == 2
+    assert report.neighbour_mean == pytest.approx((-0.98 + -0.95) / 2)
+
+
+def test_a_zero_peak_is_unscored():
+    evals = [ev(-1.0, fast=5), ev(0.0, fast=10),
+             ev(-1.0, fast=15)]
+    report = analyze_plateau(evals, {"fast": 10})
+    assert math.isnan(report.robustness)
+    assert "not profitable" in report.verdict()
+
+
+def test_a_positive_peak_still_scores_normally():
+    evals = [ev(0.90, fast=5), ev(1.00, fast=10),
+             ev(0.95, fast=15)]
+    report = analyze_plateau(evals, {"fast": 10})
+    assert report.robustness == pytest.approx(0.925)
+    assert report.is_plateau

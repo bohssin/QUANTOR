@@ -22,6 +22,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 REQUIRED = ["mcp", "numpy", "numba", "pyarrow", "pandas"]
+REQUIRED_APP = ["fastapi", "uvicorn"]
 
 GREEN, RED, YELLOW, DIM, RESET = "\033[32m", "\033[31m", "\033[33m", "\033[2m", "\033[0m"
 if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
@@ -59,6 +60,57 @@ def check_packages() -> bool:
         f"{sys.executable} -m pip install {' '.join(missing)}\n"
         "This is the usual cause of CONNECTION_CLOSED: the interpreter named in\n"
         ".mcp.json must be the one with these installed.",
+    )
+
+
+def check_app_packages() -> bool | None:
+    """The UI needs two more packages. Optional: the MCP path works without."""
+    import importlib.util
+    missing = [m for m in REQUIRED_APP if importlib.util.find_spec(m) is None]
+    return report(
+        "app packages (optional)", None if missing else True,
+        "fastapi + uvicorn present" if not missing else f"missing: {', '.join(missing)}",
+        f"{sys.executable} -m pip install fastapi 'uvicorn[standard]'\n"
+        "Only needed for the browser UI (./scripts/run.sh). The agent works "
+        "through MCP without them.",
+    )
+
+
+def check_library() -> bool:
+    """The library is what makes anything survive a restart (§16)."""
+    try:
+        from engine.library import Library
+        root = os.environ.get("QUANTOR_LIBRARY") or str(ROOT / "library")
+        lib = Library(root)
+        stats = lib.stats()
+    except Exception as exc:
+        return report("library (persistence)", False, f"{type(exc).__name__}: {exc}",
+                      "If the schema version changed, move the old library aside:\n"
+                      f"  mv {ROOT / 'library'} {ROOT / 'library.old'}")
+    return report(
+        "library (persistence)", True,
+        f"{stats['strategies']} strategies, {stats['versions']} versions, "
+        f"{stats['runs']} runs, {stats['data_sources']} sources, "
+        f"{stats['artifacts']} artifacts at {stats['root']}",
+    )
+
+
+def check_ui_assets() -> bool:
+    """A missing vendored chart library serves 200 and renders nothing."""
+    ui = ROOT / "app" / "ui"
+    needed = [
+        "index.html", "styles.css", "app.js", "api.js", "agent.js",
+        "pages/strategies.js", "pages/chart.js", "pages/data.js",
+        "pages/history.js",
+        "vendor/lightweight-charts.standalone.production.mjs",
+    ]
+    missing = [f for f in needed if not (ui / f).exists()]
+    return report(
+        "UI assets", not missing,
+        f"{len(needed)} files present" if not missing else f"missing: {', '.join(missing)}",
+        "The chart library is vendored, not fetched at runtime. Restore it with:\n"
+        "  npm pack lightweight-charts@5.0.9 && tar xzf lightweight-charts-*.tgz\n"
+        "  cp package/dist/lightweight-charts.standalone.production.mjs app/ui/vendor/",
     )
 
 
@@ -181,7 +233,12 @@ def check_end_to_end() -> bool:
     import datetime as dt
     try:
         import numpy as np
+        # A scratch library, so `doctor` never leaves a probe strategy in the
+        # owner's real one. Persistence is checked separately, above.
+        os.environ["QUANTOR_LIBRARY"] = tempfile.mkdtemp(prefix="quantor-doctor-")
+        import importlib
         from quantor_mcp import server as S
+        importlib.reload(S)
 
         n = 3000
         rng = np.random.default_rng(1)
@@ -197,7 +254,9 @@ def check_end_to_end() -> bool:
                          f"{max(open_[i], close[i]) + wick[i]:.3f},"
                          f"{min(open_[i], close[i]) - wick[i]:.3f},{close[i]:.3f}\n")
 
-        S.data_load(name="_doctor", path=str(path))
+        loaded = S.data_load(name="_doctor", path=str(path))
+        if "error" in loaded:
+            return report("end-to-end backtest", False, loaded[:110])
         S.strategy_save(
             strategy_id="_doctor", description="doctor probe",
             signal_block=(
@@ -255,13 +314,16 @@ def main() -> int:
     print(f"\nQUANTOR doctor — {ROOT}\n")
     check_python()
     have_pkgs = check_packages()
+    check_app_packages()
     if have_pkgs:
         check_engine()
         check_numba()
+        check_library()
         check_server_handshake()
         check_end_to_end()
     else:
         print(f"  {DIM}(skipping engine checks until the packages are installed){RESET}")
+    check_ui_assets()
     check_mcp_config()
     check_luxalgo()
 
@@ -274,6 +336,8 @@ def main() -> int:
     print(f"{GREEN}All checks passed.{RESET} Start a session with:\n")
     print("  claude --mcp-config .mcp.json \\")
     print('    --allowedTools "mcp__quantor-engine__*,mcp__luxalgo__*,Read,Edit"\n')
+    print("Or open the app:\n")
+    print("  ./scripts/run.sh          # then http://127.0.0.1:8000\n")
     return 0
 
 
