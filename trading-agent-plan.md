@@ -1127,26 +1127,43 @@ exposes **35 tools** in five families — `library_*` (9), `propfirms_*` (12), `
 view at all. But what the tools actually *return* differs sharply, and the plan has been wrong
 about this since rev 3:
 
-| Family | Status `[measured]` |
+| Family | Status from the development environment `[measured]` |
 |---|---|
-| **`edge_*`** | **Works, keyless.** `edge_symbols` returned real 1m coverage (BTCUSDT, 2020-01-01 → 2026-09-12, session counts); `edge_presets` returned 11 preset categories in full |
-| **`propfirms_*`** | **Simulation works offline** with an inline `spec` — the Monte Carlo core is bundled. The firm *directory* is gated |
-| **`library_*`** | **Gated behind a paid LuxAlgo plan.** Every call returns LuxAlgo's own message: *"Your LuxAlgo plan does not include this: LuxAlgo API 403 for /api/library/concepts. Upgrading … unlocks it."* |
+| **`edge_*`** | **Works.** `edge_symbols` returned real 1m coverage (BTCUSDT, 2020-01-01 → 2026-09-12); `edge_presets` returned 41 presets in full |
+| **`propfirms_*`** | **Simulation works offline** with an inline `spec` — the Monte Carlo core is bundled |
+| **`library_*`** | **Unknown.** Blocked here for an environment reason, see below |
 | `broker_*`, `trackers_*` | Untested — broker needs credentials |
 
-**This is not the egress block.** The proxy's failure log names only `mcp.luxalgo.com:443`; the
-local server's Library calls reached LuxAlgo's API and were refused *by LuxAlgo*, in LuxAlgo's
-own words. Earlier revisions of this plan described the Library as "keyless with 850+ concepts",
-which came from marketing copy rather than a call. **The server is keyless to run; the Library
-content is not free.**
+**A correction, and the reasoning is worth keeping because it is a trap.** An earlier revision
+of this section stated the Library required a paid plan. That was wrong, and the way it was
+wrong is instructive: the tool returned
 
-**What this costs.** §14.9's whole premise — screening published Library strategies as a source
-— requires that plan. So does using the Library as a concept reference (§8's parity work is
-partly justified by it). Without a subscription the system still works: the agent writes
-strategies from the owner's own descriptions, and **Edge Stats still answers "does this setup
-even occur"**, which is the highest-value pre-code check in §15.1.1 and it is free. Treat the
-Library as an *optional accelerant*, not a dependency — nothing downstream should fail when it
-is absent.
+> *"Your LuxAlgo plan does not include this: LuxAlgo API 403 for /api/library/concepts."*
+
+and that string was taken as authoritative. It is not. The client's own source says so:
+
+```js
+// This server never checks entitlements itself: tools forward the user's
+// token to the app and translate its answers —
+//   401 → sign-in challenge     403 → "your plan does not allow this"
+```
+
+It maps **any** 403 to a plan denial without knowing why. And the development environment's
+egress policy blocks `app.luxalgo.com:443` as well as `mcp.luxalgo.com:443` — both appear in
+the proxy's own failure log. So the 403 came from the proxy, was relabelled by the client as a
+billing problem, and was repeated here as fact.
+
+`edge_*` works only because its store is fetched from GitHub release assets, which the policy
+allows. Nothing about entitlement.
+
+**What follows:** the Library's real access model cannot be determined from behind this proxy.
+Verify it on the owner's machine, where neither host is blocked. Design as though it is
+available, but keep §14.9's dependency note — a section that cannot run without a third party
+should say so regardless of why.
+
+**The general lesson, which applies past this one API:** a client's error text describes what
+the client *guessed*, not what the remote system decided. Check the transport before repeating
+a diagnosis, especially one that sounds like a reason to stop.
 
 **Also verified:** a configured-but-unavailable server degrades silently. The session ran
 normally on the remaining server and answered correctly, it simply had fewer tools and was
@@ -1161,6 +1178,30 @@ The Library is used two ways, and both emit Python only — no Pine is generated
   that §14.9 designs for.
 
 ### 14.2 The engine is an MCP server
+
+#### Three bugs an audit of this server found, all silent
+
+Worth recording because each produced plausible numbers rather than an error, which is the
+failure mode this whole plan is built against.
+
+1. **One hardcoded instrument for every data source.** The server priced every backtest with a
+   single module-level `Instrument()` — fixed tick size, tick value and contract size —
+   regardless of what was loaded. §5 says nothing that drives sizing or P&L may be hardcoded,
+   and this drove all of it. Each source now carries its own instrument: tick size **detected
+   from the file** (§4.2), the rest declared at `data_load` because they are facts about the
+   contract that no CSV contains.
+
+2. **Tick sources could not be loaded at all.** `data_load` refused them outright, which is
+   absurd given the owner's data *is* ticks and `engine/store` already reads them. Bar
+   construction is now wired in (`engine/store/bars.py`, 10 tests): MT5 semantics — OHLC from
+   bid, volume as tick count, spread carried per bar, and **empty bars simply not created**.
+
+3. **The metrics timeframe was a caller-supplied guess defaulting to `M15`.** `compute_metrics`
+   annualizes Sharpe and Sortino from bars-per-year, so a caller who guessed wrong got a Sharpe
+   wrong by the square root of the ratio — silently, and flattering as often as not. Measured on
+   one unchanged trade list: **Sharpe 27.6 at M15, 106.9 at M1**, a factor of 3.87 (√15) from a
+   default parameter. The source knows its own timeframe; the tools now take it from there and
+   report it in every result, with an explicit override for deliberate cases.
 
 Without it the agent has Bash and a Python package, so every backtest is an ad-hoc script it
 writes, runs, and parses its own stdout from. Brittle, unauditable, and far more latitude than
@@ -1294,8 +1335,8 @@ it.
 
 ### 14.9 Screening the Library as a strategy source
 
-> **Requires a paid LuxAlgo plan** (§14.1) — `library_*` returns a plan-gated 403 without one.
-> Everything else in this plan works without it; this section does not.
+> **Requires working `library_*` access** (§14.1), which could not be verified from the
+> development environment. Everything else in this plan works without it; this section does not.
 
 The Library holds hundreds of published strategies. Porting them to Python,
 backtesting them on the owner's data, and generating variants is a far more

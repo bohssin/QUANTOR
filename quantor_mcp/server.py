@@ -55,7 +55,7 @@ from engine.indicators import (
 )
 from engine.optimize import FloatParam, IntParam, ParamSpec, grid_search
 from engine.signal import validate_signal_block
-from engine.store import read_csv
+from engine.store import build_bars, read_csv
 from engine.validate import rolling_folds, walk_forward
 
 from mcp.server.mcpserver import MCPServer
@@ -97,6 +97,10 @@ STRATEGY_GLOBALS: dict[str, Any] = {
     },
 }
 
+#: Fallback only. Each loaded source carries its own Instrument built from the
+#: file's detected tick size plus whatever the caller declared — §5 forbids
+#: hardcoding anything that drives sizing or P&L, and a single shared default
+#: silently prices every instrument as if it were the first one loaded.
 DEFAULT_INSTRUMENT = Instrument()
 
 
@@ -168,43 +172,76 @@ def data_list() -> str:
         return "No data loaded. Use data_load(path) first."
     rows = []
     for name, d in DATA.items():
+        inst = d.get("_instrument")
         rows.append(
-            f"{name}: kind={d['kind']} resolution_ms={d['resolution_ms']} "
-            f"bars={d['bars']:,} span={d['span']} tick_size={d['tick_size']}"
+            f"{name}: kind={d['kind']} timeframe={d.get('timeframe')} "
+            f"rows={d.get('rows', 0):,} bars={d['bars']:,} "
+            f"tick_size={d['tick_size']} "
+            f"tick_value={getattr(inst, 'tick_value', '?')} "
+            f"contract_size={getattr(inst, 'contract_size', '?')} span={d['span']}"
         )
     return "\n".join(rows)
 
 
 @server.tool(
     description=(
-        "Load a tick or bar CSV as a named data source. Columns and precision are "
-        "detected from the file; pass utc_offset_hours if the file's clock is not "
-        "UTC. Returns the quality report — read it, do not assume the file is clean."
+        "Load a tick or bar CSV as a named data source. Columns and price precision "
+        "are detected from the file. A TICK source requires `timeframe` (e.g. 'M15') "
+        "to build bars from; a bar source infers it from the row spacing. "
+        "contract_size / tick_value / commission drive sizing and P&L and cannot be "
+        "detected — pass the real ones for the instrument or the money is wrong. "
+        "Pass utc_offset_hours if the file's clock is not UTC. Returns the quality "
+        "report — read it, do not assume the file is clean."
     )
 )
 @surfacing_errors
-def data_load(name: str, path: str, utc_offset_hours: float = 0.0) -> str:
+def data_load(
+    name: str,
+    path: str,
+    utc_offset_hours: float = 0.0,
+    timeframe: str = "",
+    contract_size: float = 100.0,
+    tick_value: float = 0.10,
+    commission_per_lot_per_side: float = 3.5,
+    default_spread: float = 0.30,
+) -> str:
     from engine.store import SourceSpec
 
     md = read_csv(path, SourceSpec(utc_offset_hours=utc_offset_hours))
-    if md.kind == "bar":
-        bars = Bars(
-            ms=md.ms, open=md.to_float("open"), high=md.to_float("high"),
-            low=md.to_float("low"), close=md.to_float("close"),
-            spread=md.to_float("spread") if md.spread is not None else None,
-        )
-    else:
+    if md.kind == "tick" and not timeframe:
         raise ValueError(
-            "tick sources need bar construction, which is not wired into this "
-            "server yet — load a bar CSV for now"
+            "a tick source needs a timeframe to build bars from — pass e.g. "
+            "timeframe='M15'"
         )
+    tf = timeframe or _name_for_resolution(md.resolution_ms)
+    built = build_bars(md, tf)
+
+    bars = Bars(
+        ms=built["ms"], open=built["open"], high=built["high"],
+        low=built["low"], close=built["close"],
+        spread=built["spread"] if built["spread"].any() else None,
+    )
+
+    instrument = Instrument(
+        contract_size=contract_size,
+        tick_size=md.tick_size,                 # detected from the file, §4.2
+        tick_value=tick_value,
+        commission_per_lot_per_side=commission_per_lot_per_side,
+        default_spread=default_spread,
+    )
 
     DATA[name] = {
-        "bars": len(md), "kind": md.kind, "resolution_ms": md.resolution_ms,
-        "tick_size": md.tick_size, "_bars": bars,
+        "rows": len(md), "bars": len(bars), "kind": md.kind,
+        "timeframe": tf, "resolution_ms": md.resolution_ms,
+        "tick_size": md.tick_size, "_bars": bars, "_instrument": instrument,
         "span": f"{md.quality.first_ms}..{md.quality.last_ms}",
     }
-    return f"Loaded {name}: {len(md):,} rows\n{md.quality.summary()}"
+    return (
+        f"Loaded {name}: {len(md):,} rows -> {len(bars):,} {tf} bars\n"
+        f"{md.quality.summary()}\n"
+        f"instrument: tick_size={md.tick_size} (detected) tick_value={tick_value} "
+        f"contract_size={contract_size} commission={commission_per_lot_per_side}/lot/side"
+    )
 
 
 @server.tool(
@@ -278,20 +315,24 @@ def backtest_run(
     data: str,
     version: int = 0,
     params: dict[str, Any] | None = None,
-    timeframe: str = "M15",
+    timeframe: str = "",
     initial_capital: float = 10_000.0,
     risk_pct: float = 0.01,
 ) -> str:
     bars = _bars(data)
+    inst = _instrument(data)
+    tf = _timeframe(data, timeframe)
     v = _version(strategy_id, version)
     merged = {**v["params"], **(params or {})}
 
-    result = _evaluate(v["signal_block"], bars, merged, initial_capital, risk_pct)
-    m = compute_metrics(result, timeframe, initial_capital)
+    result = _evaluate(v["signal_block"], bars, merged, inst,
+                       initial_capital, risk_pct)
+    m = compute_metrics(result, tf, initial_capital)
 
     reconcile = abs(result.equity[-1] - initial_capital - float(result.pnl.sum()))
     return json.dumps({
         "strategy": f"{strategy_id} v{v['version']}",
+        "timeframe": tf,
         "params": merged,
         "metrics": {k: (None if isinstance(val, float) and not np.isfinite(val) else val)
                     for k, val in m.as_dict().items()},
@@ -319,10 +360,12 @@ def optimize_run(
     fixed: dict[str, Any] | None = None,
     objective: str = "return_over_maxdd",
     min_trades: int = 30,
-    timeframe: str = "M15",
+    timeframe: str = "",
     top_k: int = 10,
 ) -> str:
     bars = _bars(data)
+    inst = _instrument(data)
+    tf = _timeframe(data, timeframe)
     v = _version(strategy_id, version)
 
     params: dict[str, Any] = {}
@@ -336,13 +379,14 @@ def optimize_run(
     t0 = time.perf_counter()
     res = grid_search(
         spec,
-        lambda p: compute_metrics(_evaluate(v["signal_block"], bars, p), timeframe),
+        lambda p: compute_metrics(_evaluate(v["signal_block"], bars, p, inst), tf),
         objective=objective, min_trades=min_trades,
     )
     elapsed = time.perf_counter() - t0
 
     return json.dumps({
         "strategy": f"{strategy_id} v{v['version']}",
+        "timeframe": tf,
         "objective": objective,
         "comparisons": res.comparisons,
         "seconds": round(elapsed, 2),
@@ -372,9 +416,11 @@ def validate_run(
     version: int = 0,
     train: int = 12_000,
     test: int = 4_000,
-    timeframe: str = "M15",
+    timeframe: str = "",
 ) -> str:
     bars = _bars(data)
+    inst = _instrument(data)
+    tf = _timeframe(data, timeframe)
     v = _version(strategy_id, version)
     folds = rolling_folds(len(bars), train=train, test=test, step=test)
     if not folds:
@@ -392,13 +438,13 @@ def validate_run(
     def search(idx, a, b):
         w = bars.slice(a, b)
         r = grid_search(spec,
-                        lambda p: compute_metrics(_evaluate(v["signal_block"], w, p), timeframe),
+                        lambda p: compute_metrics(_evaluate(v["signal_block"], w, p, inst), tf),
                         min_trades=10)
         return r.best.params, r.best.score, r.comparisons
 
     def test_fold(p, a, b):
         w = bars.slice(a, b)
-        m = compute_metrics(_evaluate(v["signal_block"], w, p), timeframe)
+        m = compute_metrics(_evaluate(v["signal_block"], w, p, inst), tf)
         score = m.net_profit / m.max_drawdown if m.max_drawdown > 0 else float("-inf")
         return score, m.as_dict()
 
@@ -406,6 +452,7 @@ def validate_run(
     eff = wf.efficiency()
     return json.dumps({
         "strategy": f"{strategy_id} v{v['version']}",
+        "timeframe": tf,
         "folds": len(folds),
         "total_comparisons": wf.total_comparisons,
         "mean_oos_score": None if not np.isfinite(wf.mean_test_score) else round(wf.mean_test_score, 4),
@@ -436,7 +483,8 @@ def chart_apply(
 ) -> str:
     bars = _bars(data)
     v = _version(strategy_id, version)
-    r = _evaluate(v["signal_block"], bars, {**v["params"], **(params or {})})
+    r = _evaluate(v["signal_block"], bars, {**v["params"], **(params or {})},
+                  _instrument(data))
     n = min(r.n_trades, max_markers)
     return json.dumps({
         "strategy": f"{strategy_id} v{v['version']}",
@@ -455,9 +503,36 @@ def chart_apply(
 # --- internals ---------------------------------------------------------------
 
 def _bars(name: str) -> Bars:
+    return _source(name)["_bars"]
+
+
+def _source(name: str) -> dict[str, Any]:
     if name not in DATA:
         raise ValueError(f"unknown data source {name!r}; loaded: {list(DATA) or 'none'}")
-    return DATA[name]["_bars"]
+    return DATA[name]
+
+
+def _instrument(name: str) -> Instrument:
+    """The source's own instrument, never a shared default (§5)."""
+    return _source(name).get("_instrument", DEFAULT_INSTRUMENT)
+
+
+def _timeframe(name: str, override: str) -> str:
+    """The source knows its own timeframe; an override is for deliberate cases.
+
+    This is not cosmetic. `compute_metrics` annualizes Sharpe and Sortino from
+    bars-per-year, so a caller guessing M15 on H1 data reports a Sharpe wrong by
+    a factor of two, silently and in the flattering direction as often as not.
+    """
+    return override or _source(name).get("timeframe") or "M15"
+
+
+def _name_for_resolution(ms: int) -> str:
+    from engine.store import TIMEFRAMES
+    for name, value in TIMEFRAMES.items():
+        if value == ms:
+            return name
+    return "M15"
 
 
 def _version(strategy_id: str, version: int) -> dict[str, Any]:
@@ -472,6 +547,7 @@ def _version(strategy_id: str, version: int) -> dict[str, Any]:
 
 
 def _evaluate(signal_block: str, bars: Bars, params: dict[str, Any],
+              instrument: Instrument | None = None,
               initial_capital: float = 10_000.0, risk_pct: float = 0.01):
     """Execute a signal block in the restricted namespace and backtest it."""
     ns: dict[str, Any] = dict(STRATEGY_GLOBALS)
@@ -494,7 +570,7 @@ def _evaluate(signal_block: str, bars: Bars, params: dict[str, Any],
             f"stop_distance, target_distance — missing {exc}"
         ) from None
 
-    return run_backtest(bars, sig, DEFAULT_INSTRUMENT,
+    return run_backtest(bars, sig, instrument or DEFAULT_INSTRUMENT,
                         initial_capital=initial_capital, risk_pct=risk_pct)
 
 

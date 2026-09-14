@@ -1,4 +1,5 @@
 """Market data store: ingest, quality checks, bar construction. Plan §4."""
+from .bars import bars_from_ticks, build_bars
 from .ingest import (
     TIMEFRAMES,
     MarketData,
@@ -15,6 +16,8 @@ from .ingest import (
 
 __all__ = [
     "TIMEFRAMES",
+    "bars_from_ticks",
+    "build_bars",
     "MarketData",
     "QualityReport",
     "SourceSpec",
