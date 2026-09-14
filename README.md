@@ -26,7 +26,8 @@ owner's own MT5 backtests as the verification ground truth.
 | `engine/optimize/` | Grid and random search, objectives with guards |
 | `engine/validate/` | Fold geometry, walk-forward |
 | `engine/signal/` | Static validator for generated signal blocks (§9) |
-| `quantor_mcp/` | The engine as an MCP server — agent-tested (§14.2, Probe 9) |
+| `quantor_mcp/` | The engine as an MCP server — agent-tested end to end (§14.2) |
+| `engine/optimize/plateau.py` | Neighbourhood robustness — plateaus over peaks (§11) |
 | `bench/demo_loop.py` | End-to-end: signal → backtest → optimize → walk-forward |
 | `bench/probe_vectorbt.py` | Reproduces the VectorBT parameter-grid trap (§3.1) |
 | `tests/` | 167 passing |

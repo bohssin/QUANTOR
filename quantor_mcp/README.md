@@ -20,10 +20,14 @@ the cost assumptions or the fold geometry.
       "command": "python3",
       "args": ["/ABSOLUTE/PATH/TO/QUANTOR/quantor_mcp/server.py"]
     },
-    "luxalgo": { "command": "npx", "args": ["-y", "@luxalgo/mcp"] }
+    "luxalgo": { "type": "http", "url": "https://mcp.luxalgo.com/mcp" }
   }
 }
 ```
+
+Or register the Library directly:
+
+    claude mcp add --transport http luxalgo https://mcp.luxalgo.com/mcp
 
 **Use the absolute script path, not `-m quantor_mcp.server` with a `cwd` field.**
 The `cwd` was not applied in testing and the module is only importable from the
@@ -35,8 +39,17 @@ Then scope the agent to the tools rather than the shell:
     claude -p "..." --mcp-config .mcp.json \
       --allowedTools "mcp__quantor-engine__*,mcp__luxalgo__*,Read,Edit"
 
-Check `system/init` for `mcp_server_errors` — a server that failed to load is
-silent otherwise.
+Read the **`system/init`** event for `mcp_servers` — each entry carries a
+`status`:
+
+```json
+"mcp_servers": [{"name": "quantor-engine", "status": "connected"},
+                {"name": "luxalgo",        "status": "needs-auth"}]
+```
+
+A server that is configured but not `connected` is silent otherwise: the agent
+is not told, it simply has fewer tools and gives a worse answer for a reason
+nobody sees. Check the status; do not assume configured means available.
 
 ## Tools
 

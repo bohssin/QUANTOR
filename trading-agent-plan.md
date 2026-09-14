@@ -1109,10 +1109,21 @@ That is the design. The rest of this section is its consequences.
 
 | Server | Transport | What the agent uses it for |
 |---|---|---|
-| **LuxAlgo Library** | `https://mcp.luxalgo.com/mcp`, keyless (or `npx @luxalgo/mcp`) | **Understand a concept.** Read real Pine source to learn what an order block or an FVG actually *is*, then implement it in Python |
+| **LuxAlgo Library** | HTTP — `claude mcp add --transport http luxalgo https://mcp.luxalgo.com/mcp` | **Understand a concept.** Read real Pine source to learn what an order block or an FVG actually *is*, then implement it in Python |
 | **Edge Stats** | stdio | Conditional frequencies over M1 bars, N and a Wilson CI on every answer. "Does this setup even occur, and how often" — *before* writing a strategy for it |
 | **Prop Firm Sim** | stdio | Block-bootstrap Monte Carlo over the R-multiple series a backtest produced |
 | **QUANTOR engine** | stdio, **ours** | Run backtests, sweeps, validation; read results; render on the chart (§14.2) |
+
+**Unverified from the development environment.** `mcp.luxalgo.com:443` is denied by the egress
+policy there (403 on CONNECT), and with the HTTP transport configured the session reports the
+server as `needs-auth`. Whether that reflects a genuine auth requirement or just the blocked
+host cannot be distinguished from behind the proxy, so **confirm the tool surface on the
+owner's machine** before building anything that assumes a particular set of `library_*` tools.
+
+What *was* verified: a configured-but-unavailable server degrades gracefully — the session ran
+normally on the remaining server and answered correctly, it simply had fewer tools. Which is
+exactly why a run must check the status rather than trust that configuration equals
+availability.
 
 The Library is used two ways, and both emit Python only — no Pine is generated, stored or run:
 
@@ -1208,8 +1219,18 @@ unavailable.
 
 What still works:
 
-- `--mcp-config <file>` — pin the exact server set per run, and check `system/init` for
-  `mcp_servers` / `mcp_server_errors` to fail fast when one does not load.
+- `--mcp-config <file>` — pin the exact server set per run, and read the **`system/init`**
+  event for `mcp_servers`, which carries a per-server `status` `[measured]`:
+
+  ```json
+  "mcp_servers": [{"name": "quantor-engine", "status": "connected"},
+                  {"name": "luxalgo",        "status": "needs-auth"}]
+  ```
+
+  Note the states are distinct: `needs-auth` is not `failed`, and neither is an error the agent
+  is told about — it simply has fewer tools. A run should record this list and **refuse to
+  proceed when a server it needs is not `connected`**, because the alternative is a session
+  that quietly works without the Library and produces a worse answer for a reason nobody sees.
 - `--settings <file>` and `--append-system-prompt-file` — pin instructions explicitly.
 - `--allowedTools` scoped to the MCP tools plus `Read`/`Edit`.
 - `--permission-mode`, `--max-turns` (§17).
@@ -1745,16 +1766,40 @@ returns `{"error": "KeyError: 'fast'", "hint": ...}` as text. Re-running the ide
 It reached **v3** of its strategy — self-correcting twice from the error text — and finished by
 reporting an honest losing result rather than dressing it up, then offering `optimize_run`.
 
-**Left for a local run:** LuxAlgo's MCP endpoint is egress-blocked from this environment, so
-its tool surface is unverified, and `--resume` across a restart is untested.
+**4. The full workflow ran, and the validation layer did its job through the agent.** A second
+session was asked to load data, write a strategy, backtest it, sweep parameters with
+`optimize_run`, then `validate_run` the same grid and say honestly whether it generalized.
+14 turns, $0.27, zero permission denials, MCP tools only.
+
+On deliberately synthetic random-walk data it reported **walk-forward efficiency −0.447**, read
+the per-fold table correctly ("folds 2 and 3 are the tell: parameters that looked strong in
+training, both flipped to losses out-of-sample"), identified the one positive out-of-sample
+fold as noise because its parameters had been *negative* in training, and concluded:
+
+> this did not generalize … the in-sample optimization was fitting noise rather than a real
+> edge … I wouldn't trade this configuration; it would need a genuinely different signal or
+> filter rather than further tuning of this same grid.
+
+That is the whole point of §12 reaching the agent intact. It did not keep tuning until
+something looked good — it concluded the edge was not there, which on noise is the correct
+answer. The machinery and the agent's reading of it both work.
+
+**Left for a local run:** the LuxAlgo tool surface (see §14.1 — blocked host here), and
+`--resume` across a restart.
 
 Codex is out of scope (§14.7).
 
-**Probe 7 — conversational strategy loop.** The centrepiece feature (§15.1) is a conversation
-that produces and refines strategies over many turns, so probe the loop rather than a single
-generation. In one session: brainstorm a concept against the Library and Edge Stats, have the
-agent write a signal block, backtest it, view it on the chart, then ask for three successive
-refinements.
+**Probe 7 — conversational strategy loop. Partly answered by Probe 9.** A single session
+already runs the full chain — write, backtest, sweep, validate, interpret — self-correcting
+from tool errors along the way, reaching v3 of its own strategy. What that does *not* test is
+the part §15.1 actually rests on:
+
+- **Continuity.** Does `--resume` restore the conversation *with its MCP servers*, and does the
+  agent still know what it already tried and rejected?
+- **Context shape** (§15.2). Full transcript, rolling window, or a compact strategy state
+  regenerated from the library each turn? This is the cost-and-quality decision, and it should
+  be measured rather than guessed.
+- **Several strategies at once.** A session that branches into three variants and parks two.
 
 What this measures:
 
