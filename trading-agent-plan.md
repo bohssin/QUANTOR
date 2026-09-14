@@ -1134,13 +1134,21 @@ about this since rev 3:
 | **`library_*`** | **Unknown.** Blocked here for an environment reason, see below |
 | `broker_*`, `trackers_*` | Untested — broker needs credentials |
 
-**A correction, and the reasoning is worth keeping because it is a trap.** An earlier revision
-of this section stated the Library required a paid plan. That was wrong, and the way it was
-wrong is instructive: the tool returned
+**The Library is free.** Retracting an earlier claim in this plan that it required a paid
+plan — it does not, and the licence is explicit:
+
+> **Free with attribution.** Every concept page, family hub, and written explanation in the
+> Library is free to read, quote, copy, index, embed, and train on — for people, assistants,
+> agents, and crawlers alike. … The one condition: attribution.
+
+861 concepts, 1,347 indicator implementations, 17 families. Two prohibitions only: do not
+republish it wholesale as a competing catalog, and do not sell access to the content as-is.
+
+**How the wrong conclusion happened, because the trap will recur.** `library_*` returned
 
 > *"Your LuxAlgo plan does not include this: LuxAlgo API 403 for /api/library/concepts."*
 
-and that string was taken as authoritative. It is not. The client's own source says so:
+and that string was taken as authoritative. It is not — the client's own source says it guesses:
 
 ```js
 // This server never checks entitlements itself: tools forward the user's
@@ -1148,22 +1156,57 @@ and that string was taken as authoritative. It is not. The client's own source s
 //   401 → sign-in challenge     403 → "your plan does not allow this"
 ```
 
-It maps **any** 403 to a plan denial without knowing why. And the development environment's
-egress policy blocks `app.luxalgo.com:443` as well as `mcp.luxalgo.com:443` — both appear in
-the proxy's own failure log. So the 403 came from the proxy, was relabelled by the client as a
-billing problem, and was repeated here as fact.
+Any 403, from any cause, is relabelled as a billing problem. **A client's error text describes
+what the client guessed, not what the remote system decided.**
 
-`edge_*` works only because its store is fetched from GitHub release assets, which the policy
-allows. Nothing about entitlement.
+**What is actually true, and what is still unknown.** All three LuxAlgo hosts —
+`mcp.luxalgo.com`, `app.luxalgo.com`, `www.luxalgo.com` — are blocked by the development
+environment's egress policy, so nothing here is conclusive about the live service. Through a
+relay that is *not* blocked, `library_*` still returns 403 while `luxalgo_account` returns a
+distinct sign-in challenge, so the API does distinguish the two cases and the 403 is not simply
+"unauthenticated". The cause — datacenter-IP filtering, bot protection, or a session
+requirement — could not be determined and **should be established on the owner's machine**,
+signed in via `npx -y @luxalgo/mcp login`.
 
-**What follows:** the Library's real access model cannot be determined from behind this proxy.
-Verify it on the owner's machine, where neither host is blocked. Design as though it is
-available, but keep §14.9's dependency note — a section that cannot run without a third party
-should say so regardless of why.
+#### The Library does not need MCP at all
 
-**The general lesson, which applies past this one API:** a client's error text describes what
-the client *guessed*, not what the remote system decided. Check the transport before repeating
-a diagnosis, especially one that sounds like a reason to stop.
+The more useful finding. Every concept page is served as **plain markdown**, free and without
+authentication, and this is a deliberate feature:
+
+> The Copy for LLM button, the `.md` rendition of every concept page, and `/llms.txt` exist
+> precisely so machines can use this material well.
+
+| Path | What it gives |
+|---|---|
+| `luxalgo.com/library/concept/<slug>.md` | one concept in full — definition, formula, how it is read, its implementations |
+| `luxalgo.com/library/family/<slug>/` | a family hub |
+| `luxalgo.com/llms-full.txt` | **all 861 concepts**, grouped by family, in one document |
+| `luxalgo.com/llms.txt` | the index, with the 40 most-implemented concepts and their slugs |
+
+So the design should treat the MCP server as the *convenient* path and the markdown mirror as
+the *reliable* one: MCP gives the agent search and structured lookups; a plain fetch gives it
+the same content with no auth, no key and no server. **§14.9's screening workflow can be built
+against the markdown mirror alone**, which removes the third-party dependency that section was
+carrying.
+
+#### Attribution is a requirement, not a courtesy
+
+The licence's one condition, and the system must honour it mechanically rather than relying on
+the agent to remember:
+
+```
+Source: LuxAlgo Library — luxalgo.com/library/concept/<slug>
+```
+
+When a strategy is derived from a Library concept, the **source URL is stored on the strategy
+version** (§16.1) and rendered wherever the strategy is displayed. That is also good research
+hygiene independent of the licence: six months on, "where did this idea come from" is a
+question the library should answer.
+
+**Indicator source code is licensed separately** — CC BY-NC-SA 4.0, and the licence is explicit
+that *"using these indicators to trade your own account is not commercial use"*. That covers the
+owner's case. Selling the system, redistributing it, or building it into a paid product would
+not, so the distinction belongs in the record now rather than being rediscovered later.
 
 **Also verified:** a configured-but-unavailable server degrades silently. The session ran
 normally on the remaining server and answered correctly, it simply had fewer tools and was
@@ -1335,8 +1378,10 @@ it.
 
 ### 14.9 Screening the Library as a strategy source
 
-> **Requires working `library_*` access** (§14.1), which could not be verified from the
-> development environment. Everything else in this plan works without it; this section does not.
+> **Needs Library access, which is free** (§14.1). Prefer the MCP tools when they are working;
+> fall back to the markdown mirror (`luxalgo.com/library/concept/<slug>.md`, or `llms-full.txt`
+> for all 861 at once), which needs no key, no sign-in and no server. Store the source URL on
+> every strategy derived this way — attribution is the licence's one condition.
 
 The Library holds hundreds of published strategies. Porting them to Python,
 backtesting them on the owner's data, and generating variants is a far more
@@ -1558,7 +1603,7 @@ rejected.
 |---|---|---|
 | **Data source** | file hash, symbol, kind, resolution, GMT offset, row count, span | A run is meaningless without knowing which bytes it read |
 | **Strategy** | name, tags, notes, archived flag | The unit the owner thinks in |
-| **Strategy version** | signal-block source, params spec, parent version, origin | Every edit is a new version. Nothing is overwritten |
+| **Strategy version** | signal-block source, params spec, parent version, origin, **source URL** | Every edit is a new version. Nothing is overwritten. The source URL satisfies §14.1's attribution condition and answers "where did this idea come from" six months on |
 | **Run** | kind, symbol, timeframe, modeling mode, span, seed, all four stamped versions, status, artifact path | The reproducibility record |
 | **Optimization** | mode, objective, budget, **comparison count**, full result table | §12's deflated Sharpe needs the trial count; §18's ceilings need the spend |
 | **Validation** | per-mode verdicts, overfit detectors, holdout-touched flag | §13 depends on the holdout being provably touched once |

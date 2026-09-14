@@ -2,7 +2,8 @@
   "mcpServers": {
     "quantor-engine": {
       "command": "python3",
-      "args": ["/ABSOLUTE/PATH/TO/QUANTOR/quantor_mcp/server.py"]
+      "args": ["/ABSOLUTE/PATH/TO/QUANTOR/quantor_mcp/server.py"],
+      "comment": "python3 must have: mcp numpy numba pyarrow pandas. Use a venv's python if the system one does not."
     },
     "luxalgo": {
       "command": "npx",

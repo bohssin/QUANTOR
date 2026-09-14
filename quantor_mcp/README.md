@@ -7,7 +7,15 @@ the cost assumptions or the fold geometry.
 ## Run
 
     pip install mcp numpy numba pyarrow pandas
-    python3 -m quantor_mcp.server        # stdio
+    python3 quantor_mcp/server.py        # stdio
+
+**The interpreter in `.mcp.json` must be the one with those packages.** If the
+system `python3` lacks `mcp`, the server exits immediately and the client
+reports only `CONNECTION_CLOSED` — no traceback, nothing pointing at the real
+cause. Point `command` at a venv's python if so:
+
+    python3 -m venv .venv && .venv/bin/pip install mcp numpy numba pyarrow pandas
+    # then "command": "/abs/path/.venv/bin/python" 
 
 ## Register with Claude Code
 
